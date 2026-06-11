@@ -6,10 +6,13 @@ verification happens on real runs, per CLAUDE.md)."""
 import inspect
 import math
 
-from transformers import AutoTokenizer
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import grpo.train_loop as train_loop_module
 from grpo.data.gsm8k_data import render_prompt
+from grpo.loss import grpo_loss_from_token_logprobs, shifted_token_logprobs
+from grpo.train_loop import build_batch_phase, forward_loss_phase
 from grpo.instrumentation.timing import (
     TIMING_RESIDUAL_KEY,
     TOKENS_PER_SEC_GENERATE_KEY,
@@ -125,6 +128,65 @@ def test_two_steps_end_to_end(monkeypatch):
     for batch in generator.received_prompts:
         for ids in batch:
             assert all(isinstance(t, int) for t in ids)
+
+
+def test_grad_accum_exactly_matches_full_batch():
+    """THE accumulation test: chunked loss AND gradients must equal the
+    full-batch computation. Chunks are built with unequal token counts so a
+    mean-of-chunk-means implementation fails (negative control below)."""
+    torch.manual_seed(0)
+    tokenizer = AutoTokenizer.from_pretrained(TINY_MODEL)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model = AutoModelForCausalLM.from_pretrained(TINY_MODEL)
+    model.eval()  # tiny-gpt2 has dropout; eval makes both passes deterministic
+
+    # 3 prompts of different lengths x G=2, completion lengths 5..14: B=6
+    # with unequal per-chunk completion-token counts.
+    questions = ["a?", "what is 2+2?", "a much longer question about apples?"]
+    prompt_ids = [render_prompt(tokenizer, q) for q in questions]
+    generator = FakeGenerator(tokenizer, completion_tokens=(5, 14), seed=3)
+    outs = generator.generate(prompt_ids, 2, ground_truths=["1", "2", "3"])
+    batch = build_batch_phase(prompt_ids, outs, 2, tokenizer.pad_token_id, "cpu")
+    advantages = torch.randn(6, generator=torch.Generator().manual_seed(7))
+
+    def run(micro_batch_size):
+        model.zero_grad(set_to_none=True)
+        loss, identity = forward_loss_phase(model, batch, advantages, micro_batch_size)
+        grads = [
+            None if p.grad is None else p.grad.clone() for p in model.parameters()
+        ]
+        return loss, identity, grads
+
+    loss_full, identity_full, grads_full = run(6)  # one chunk = full batch
+    loss_chunked, identity_chunked, grads_chunked = run(2)  # 3 unequal chunks
+
+    assert torch.allclose(loss_chunked, loss_full, atol=1e-6)
+    assert abs(identity_chunked - identity_full) < 1e-6
+    for g_full, g_chunked in zip(grads_full, grads_chunked):
+        assert (g_full is None) == (g_chunked is None)
+        if g_full is not None:
+            assert torch.allclose(g_full, g_chunked, atol=1e-6)
+
+    # Negative control (inject-the-failure): the naive mean of per-chunk
+    # losses must NOT equal the full-batch token-mean on this construction —
+    # otherwise this test couldn't catch the mean-of-means bug.
+    with torch.no_grad():
+        chunk_losses = []
+        for start in range(0, 6, 2):
+            sl = slice(start, start + 2)
+            logits = model(
+                input_ids=batch["input_ids"][sl],
+                attention_mask=batch["attention_mask"][sl],
+            ).logits
+            token_logprobs = shifted_token_logprobs(logits, batch["input_ids"][sl])
+            chunk_losses.append(
+                grpo_loss_from_token_logprobs(
+                    token_logprobs, batch["completion_mask"][sl], advantages[sl]
+                )
+            )
+        naive_mean_of_means = torch.stack(chunk_losses).mean()
+    assert not torch.isclose(naive_mean_of_means, loss_full, atol=1e-6)
 
 
 def test_config_defaults_match_locked_decisions():

@@ -50,6 +50,11 @@ class TrainConfig:
     model_dtype: str = "bfloat16"
     group_size: int = 4
     prompts_per_step: int = 2
+    # Trainer-forward chunk size along B (gradient accumulation). The full
+    # step batch (prompts_per_step * group_size sequences) OOMed at 1.5B on
+    # 40GB from activation memory; gradients are mathematically identical to
+    # full-batch (see forward_loss_phase).
+    micro_batch_size: int = 8
     max_steps: int = 2
     lr: float = 1e-5
     seed: int = 0
@@ -138,23 +143,56 @@ def logprob_identity(token_logprobs, batch):
         return (((token_logprobs - behavior) * mask).sum() / mask.sum()).item()
 
 
-def forward_loss_phase(model, batch, advantages):
-    logits = model(
-        input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]
-    ).logits
-    # The one full-vocab log_softmax of the step, shared by loss and identity.
-    token_logprobs = shifted_token_logprobs(logits, batch["input_ids"])
-    loss = grpo_loss_from_token_logprobs(
-        token_logprobs, batch["completion_mask"], advantages
-    )
-    identity = logprob_identity(token_logprobs, batch)
-    return loss, identity
+def forward_loss_phase(model, batch, advantages, micro_batch_size):
+    """Chunked forward+backward along B (gradient accumulation).
+
+    Each chunk's loss is weighted by chunk_completion_tokens /
+    total_completion_tokens, so the summed gradients AND the returned
+    aggregate loss equal the full-batch token-mean EXACTLY. Mean-of-chunk-
+    means would be wrong: chunks have unequal token counts.
+
+    backward() runs per chunk, inside this phase: that frees each chunk's
+    graph (and its full-vocab log_softmax buffer) before the next forward —
+    the whole point, since 1.5B OOMed on activations. Only the detached
+    (b, T-1) gathered logprobs are kept, concatenated for the identity
+    check (unchanged semantics). Returns (detached aggregate loss, identity).
+    """
+    assert micro_batch_size >= 1
+    B = batch["input_ids"].shape[0]
+    total_tokens = batch["completion_mask"][:, 1:].sum()
+    if total_tokens == 0:
+        raise ValueError("completion_mask selects no tokens in the shifted frame")
+
+    aggregate_loss = torch.zeros((), device=batch["input_ids"].device)
+    chunk_logprobs = []
+    for start in range(0, B, micro_batch_size):
+        sl = slice(start, start + micro_batch_size)
+        logits = model(
+            input_ids=batch["input_ids"][sl],
+            attention_mask=batch["attention_mask"][sl],
+        ).logits
+        token_logprobs = shifted_token_logprobs(logits, batch["input_ids"][sl])
+        del logits  # the (b, T, V) tensor drives peak memory; drop it now
+        chunk_mask = batch["completion_mask"][sl]
+        chunk_tokens = chunk_mask[:, 1:].sum()
+        if chunk_tokens > 0:  # a chunk of all-empty completions contributes 0
+            chunk_loss = grpo_loss_from_token_logprobs(
+                token_logprobs, chunk_mask, advantages[sl]
+            )
+            weighted = chunk_loss * (chunk_tokens / total_tokens)
+            weighted.backward()  # accumulates grads; frees this chunk's graph
+            aggregate_loss += weighted.detach()
+        chunk_logprobs.append(token_logprobs.detach())
+
+    identity = logprob_identity(torch.cat(chunk_logprobs, dim=0), batch)
+    return aggregate_loss, identity
 
 
-def optimizer_phase(optimizer, loss):
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
+def optimizer_phase(optimizer):
+    """Gradients were accumulated in forward_loss_phase; step once, then
+    clear for the next step's accumulation."""
     optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
 
 
 def log_phase(metrics, step):
@@ -219,9 +257,12 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
                 device,
             )
         with timer.phase("forward_loss"):
-            loss, identity = forward_loss_phase(model, batch, advantages)
+            # Includes per-chunk backward (inherent to accumulation).
+            loss, identity = forward_loss_phase(
+                model, batch, advantages, cfg.micro_batch_size
+            )
         with timer.phase("optimizer"):
-            optimizer_phase(optimizer, loss)
+            optimizer_phase(optimizer)
         # log_phase is NOT timed: it emits this step's own summary, and its
         # cost falls outside wall_clock (taken here), keeping the residual
         # honest instead of silently absorbing logging time.

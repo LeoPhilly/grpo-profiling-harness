@@ -80,6 +80,13 @@ def main():
         "and get reward 0 naturally via the strict parser",
     )
     parser.add_argument("--gpu-mem-util", type=float, default=0.3)
+    parser.add_argument(
+        "--micro-batch-size",
+        type=int,
+        default=8,
+        help="trainer forward/backward chunk size (gradient accumulation; "
+        "full 32-seq batch OOMed at 1.5B/40GB on activations)",
+    )
     parser.add_argument("--run-name", required=True)
     args = parser.parse_args()
 
@@ -92,6 +99,7 @@ def main():
         prompts_per_step=args.prompts_per_step,
         max_steps=args.steps,
         gpu_memory_utilization=args.gpu_mem_util,
+        micro_batch_size=args.micro_batch_size,
         wandb_mode="online",
     )
 
