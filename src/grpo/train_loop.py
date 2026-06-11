@@ -10,6 +10,14 @@ trainer builds sequences as prompt_ids + completion_token_ids, so behavior
 logprobs stay aligned 1:1 with the tokens the loss sees.
 """
 
+import os
+
+# Fragmentation: the first 1.5B run OOMed with 5.3GB reserved-but-unallocated
+# while coexisting with vLLM's resident pool; expandable segments lets the
+# allocator grow/shrink instead of pinning fixed blocks. Read lazily at first
+# CUDA allocation; harmless no-op on CPU.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 from dataclasses import asdict, dataclass
 
 import torch
@@ -27,10 +35,19 @@ from grpo.loss import grpo_loss_from_token_logprobs, shifted_token_logprobs
 from grpo.rewards.gsm8k import gsm8k_reward_with_format
 
 
+# Trainer-side peak memory key (R2 needs this number alongside vLLM's pool).
+MEM_PEAK_KEY = "mem/trainer_peak_gb"
+
+
 @dataclass
 class TrainConfig:
     model_name: str = "sshleifer/tiny-gpt2"
     device: str = "cpu"  # the one device knob; the GPU box passes "cuda"
+    # R0 baseline is a bf16 trainer (fp32 Adam state OOMed at 1.5B). The Mac
+    # tiny-gpt2 test path passes "float32" here — config, not branching logic.
+    # Pure-bf16 Adam (bf16 moments); fp32 master weights is the documented
+    # fallback if the learning gate shows instability (see future_work.md).
+    model_dtype: str = "bfloat16"
     group_size: int = 4
     prompts_per_step: int = 2
     max_steps: int = 2
@@ -156,7 +173,9 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(cfg.model_name).to(device)
+    model = AutoModelForCausalLM.from_pretrained(
+        cfg.model_name, torch_dtype=getattr(torch, cfg.model_dtype)
+    ).to(device)
     model.train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
 
@@ -169,6 +188,10 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
     for batch_pairs in iter_prompt_batches(pairs, cfg.prompts_per_step):
         if step >= cfg.max_steps:
             break
+        if device.type == "cuda":
+            # Per-step peak: reset here so the number is this step's, not a
+            # high-water mark from warm-up or earlier steps.
+            torch.cuda.reset_peak_memory_stats(device)
         timer.start_step()
         with timer.phase("render"):
             # The single tokenization of prompt text; ids flow from here.
@@ -218,6 +241,10 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
             TOKENS_PER_SEC_GENERATE_KEY: completion_tokens / summary["generate"],
             **to_wandb_metrics(summary),
         }
+        if device.type == "cuda":
+            metrics[MEM_PEAK_KEY] = (
+                torch.cuda.max_memory_allocated(device) / 1024**3  # GiB
+            )
         log_phase(metrics, step)
         history.append(metrics)
         step += 1

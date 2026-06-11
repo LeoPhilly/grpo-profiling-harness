@@ -74,6 +74,7 @@ def test_two_steps_end_to_end(monkeypatch):
     cfg = TrainConfig(
         model_name=TINY_MODEL,
         device="cpu",
+        model_dtype="float32",  # CPU plumbing path; R0 bf16 is GPU-only
         group_size=4,
         prompts_per_step=2,
         max_steps=2,
@@ -124,6 +125,12 @@ def test_two_steps_end_to_end(monkeypatch):
     for batch in generator.received_prompts:
         for ids in batch:
             assert all(isinstance(t, int) for t in ids)
+
+
+def test_config_defaults_match_locked_decisions():
+    cfg = TrainConfig()
+    assert cfg.model_dtype == "bfloat16"  # R0 baseline trainer dtype
+    assert cfg.gpu_memory_utilization == 0.3  # R2 starting split
 
 
 def test_build_batch_takes_no_tokenizer():

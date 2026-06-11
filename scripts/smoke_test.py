@@ -103,6 +103,9 @@ def main():
         device=device,
         max_steps=args.steps,
         wandb_mode="offline",
+        # R0 trainer is bf16; the tiny-gpt2 plumbing path stays fp32 so the
+        # Mac bit-identity baseline is preserved (config, not branching).
+        model_dtype="float32" if args.generator == "fake" else "bfloat16",
     )
 
     from transformers import AutoTokenizer
