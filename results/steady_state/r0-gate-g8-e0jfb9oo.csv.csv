@@ -1,0 +1,15 @@
+metric,mean,std,share_of_wall_pct
+time/build_batch,0.005487,0.000496,0.059
+time/forward_loss,1.644735,0.166014,17.727
+time/generate,7.55962,0.870169,81.478
+time/optimizer,0.053711,0.00012,0.579
+time/render,0.002305,0.000129,0.025
+time/reward,0.00059,0.000135,0.006
+time/sync_weights,0.011307,0.000135,0.122
+time/wall_clock,9.27809,1.030822,
+time/tokens_per_sec_generate,1194.704282,,
+train/reward_mean,0.69,,
+train/format_rate,0.939375,,
+n_steps,50,,
+window,"[50,100)",,
+mean_abs_timing_residual,3.7e-05,,
