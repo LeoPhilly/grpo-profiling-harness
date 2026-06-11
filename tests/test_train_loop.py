@@ -97,8 +97,12 @@ def test_two_steps_end_to_end(monkeypatch):
         assert "train/reward_mean" in logged
 
     # FakeGenerator makes exactly half of each group correct, so if rewards
-    # flowed through the real scorer the mean is exactly 0.5.
+    # flowed through the real scorer the mean is exactly 0.5. ALL of its
+    # completions carry the #### marker (even wrong ones), so format_rate
+    # is exactly 1.0 — anything else means extraction/accounting broke.
     assert history[0]["train/reward_mean"] == 0.5
+    assert all(m["train/format_rate"] == 1.0 for m in history)
+    assert all("train/format_rate" in logged for logged in recorder.logged)
 
     # Timing keys: every phase, wall clock, residual, tokens/sec — all
     # logged, all finite, and the residual within the standing 5% bound.

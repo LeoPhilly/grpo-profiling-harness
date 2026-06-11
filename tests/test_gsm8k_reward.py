@@ -3,7 +3,11 @@ import inspect
 import pytest
 
 import grpo.rewards.gsm8k as gsm8k_module
-from grpo.rewards.gsm8k import PROMPT_SUFFIX, gsm8k_reward
+from grpo.rewards.gsm8k import (
+    PROMPT_SUFFIX,
+    gsm8k_reward,
+    gsm8k_reward_with_format,
+)
 from grpo.rewards.verl_gsm8k import compute_score as verl_compute_score
 
 LONG = "step " * 80 + "\nso the result follows.\n#### 72"  # > 300 chars
@@ -68,6 +72,28 @@ def test_flexible_mode_not_reachable():
     source = inspect.getsource(gsm8k_module)
     assert "flexible" not in source
     assert 'method="strict"' in source
+
+
+@pytest.mark.parametrize(
+    "completion, ground_truth, expected",
+    [
+        ("#### 72", "72", (1.0, True)),  # formatted and correct
+        ("#### 71", "72", (0.0, True)),  # formatted, wrong answer
+        ("the answer is 72", "72", (0.0, False)),  # no marker: format failure
+        ("", "72", (0.0, False)),
+        (None, "72", (0.0, False)),  # never raises, reports unformatted
+    ],
+    ids=["correct", "wrong_but_formatted", "unformatted", "empty", "non_string"],
+)
+def test_reward_with_format_tuple(completion, ground_truth, expected):
+    assert gsm8k_reward_with_format(completion, ground_truth) == expected
+
+
+def test_reward_delegates_to_with_format():
+    # One extraction path: the scalar reward must always equal tuple[0].
+    for completion in ["#### 72", "#### 71", "no marker 72", "", "#### 72."]:
+        reward, _ = gsm8k_reward_with_format(completion, "72")
+        assert gsm8k_reward(completion, "72") == reward
 
 
 def test_prompt_suffix_contract():

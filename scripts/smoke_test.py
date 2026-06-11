@@ -19,7 +19,7 @@ import torch  # noqa: E402
 
 from grpo.data.gsm8k_data import gsm8k_pairs  # noqa: E402
 from grpo.instrumentation.timing import TIMING_RESIDUAL_KEY  # noqa: E402
-from grpo.rewards.gsm8k import gsm8k_reward  # noqa: E402
+from grpo.rewards.gsm8k import gsm8k_reward, gsm8k_reward_with_format  # noqa: E402
 from grpo.rewards.verl_gsm8k import extract_solution  # noqa: E402
 from grpo.train_loop import TrainConfig, train  # noqa: E402
 
@@ -55,6 +55,22 @@ class _DumpFirstStep:
                     f">>> extracted={extracted!r} ground_truth={gt!r} "
                     f"reward={gsm8k_reward(out['text'], gt)}"
                 )
+            # Summary over the WHOLE step-0 batch, not just the N shown.
+            stats = [
+                gsm8k_reward_with_format(
+                    out["text"],
+                    ground_truths[i // group_size] if ground_truths else None,
+                )
+                for i, out in enumerate(outs)
+            ]
+            n_formatted = sum(formatted for _, formatted in stats)
+            n_correct = sum(
+                1 for reward, formatted in stats if formatted and reward == 1.0
+            )
+            print(
+                f">>> format rate: {n_formatted}/{len(outs)}, "
+                f"correct-given-formatted: {n_correct}/{n_formatted}"
+            )
             print("=== END DUMP ===")
         return outs
 

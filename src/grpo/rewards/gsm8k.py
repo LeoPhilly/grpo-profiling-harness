@@ -27,18 +27,26 @@ PROMPT_SUFFIX = (
 )
 
 
-def gsm8k_reward(completion: str, ground_truth: str) -> float:
+def gsm8k_reward_with_format(completion: str, ground_truth: str) -> tuple:
+    """(reward, formatted). formatted is True iff strict extraction found an
+    answer — the format-following rate is first-class because GRPO cannot
+    bootstrap from all-zero groups, and small models fail the format long
+    before they fail the math. One extraction serves both values."""
     try:
         answer = extract_solution(completion, method="strict")
         if answer is None:
-            return 0.0
+            return 0.0, False
         if answer.endswith("."):
             answer = answer[:-1]
         if answer == ground_truth:
-            return 1.0
+            return 1.0, True
         try:
-            return 1.0 if float(answer) == float(ground_truth) else 0.0
+            return (1.0 if float(answer) == float(ground_truth) else 0.0), True
         except (TypeError, ValueError):
-            return 0.0
+            return 0.0, True
     except Exception:
-        return 0.0
+        return 0.0, False
+
+
+def gsm8k_reward(completion: str, ground_truth: str) -> float:
+    return gsm8k_reward_with_format(completion, ground_truth)[0]

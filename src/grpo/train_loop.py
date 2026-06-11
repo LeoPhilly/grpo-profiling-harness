@@ -24,7 +24,7 @@ from grpo.instrumentation.timing import (
     to_wandb_metrics,
 )
 from grpo.loss import grpo_loss_from_token_logprobs, shifted_token_logprobs
-from grpo.rewards.gsm8k import gsm8k_reward
+from grpo.rewards.gsm8k import gsm8k_reward_with_format
 
 
 @dataclass
@@ -55,11 +55,15 @@ def generate_phase(generator, prompt_token_ids, ground_truths, group_size):
 
 
 def reward_phase(outs, ground_truths, group_size):
-    rewards = [
-        gsm8k_reward(out["text"], ground_truths[i // group_size])
+    """Returns (rewards (B,), format_rate). One extraction per completion
+    serves both — formatted means strict extraction found an answer."""
+    results = [
+        gsm8k_reward_with_format(out["text"], ground_truths[i // group_size])
         for i, out in enumerate(outs)
     ]
-    return torch.tensor(rewards)
+    rewards = torch.tensor([reward for reward, _ in results])
+    format_rate = sum(formatted for _, formatted in results) / len(results)
+    return rewards, format_rate
 
 
 def build_batch_phase(prompt_token_ids, outs, group_size, pad_token_id, device):
@@ -179,7 +183,7 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
                 generator, prompt_token_ids, ground_truths, cfg.group_size
             )
         with timer.phase("reward"):
-            rewards = reward_phase(outs, ground_truths, cfg.group_size)
+            rewards, format_rate = reward_phase(outs, ground_truths, cfg.group_size)
             advantages = compute_group_advantages(rewards, cfg.group_size).to(
                 device
             )
@@ -204,6 +208,9 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
         metrics = {
             "train/loss": loss.item(),
             "train/reward_mean": rewards.mean().item(),
+            # GRPO can't bootstrap from all-zero groups; format compliance is
+            # the leading indicator of that failure mode at small scale.
+            "train/format_rate": format_rate,
             "train/completion_tokens": completion_tokens,
             "check/logprob_identity": identity,
             # Util alone is deceptive; tokens/sec of useful work is the
