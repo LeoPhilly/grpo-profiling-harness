@@ -1,17 +1,19 @@
 import torch
-import torch.nn.functional as F
 
 
 def shifted_token_logprobs(logits: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
     """(B, T-1) logprob of each actually-present next token: logits[:, :-1]
     scoring input_ids[:, 1:] (the shifted/target frame).
 
-    This is the ONE full-vocab log_softmax of the step. The loss and the
-    logprob-identity check (standing check #1) must both consume this result:
-    a second log_softmax over (B, T, V) duplicates gigabytes of peak memory
-    at real vocab sizes (caused the first GPU OOM)."""
-    logprobs = F.log_softmax(logits[:, :-1, :], dim=-1)
-    return logprobs.gather(-1, input_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
+    Computed as gathered_logit - logsumexp(logits): identical math to
+    log_softmax+gather, but never materializes the full (B, T, V) logprob
+    tensor — only the (B, T-1) reduction. log_softmax materialized it and
+    OOMed at step 1 (when Adam state had claimed its memory). The loss and
+    the logprob-identity check (standing check #1) must both consume this
+    one result; computing it twice doubles the transient full-vocab cost."""
+    shifted = logits[:, :-1, :]
+    gathered = shifted.gather(-1, input_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
+    return gathered - torch.logsumexp(shifted, dim=-1)
 
 
 def grpo_loss_from_token_logprobs(

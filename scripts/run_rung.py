@@ -83,9 +83,10 @@ def main():
     parser.add_argument(
         "--micro-batch-size",
         type=int,
-        default=8,
+        default=4,
         help="trainer forward/backward chunk size (gradient accumulation; "
-        "full 32-seq batch OOMed at 1.5B/40GB on activations)",
+        "full 32-seq batch OOMed at 1.5B/40GB on activations, 8 OOMed at "
+        "steady state with Adam moments resident)",
     )
     parser.add_argument("--run-name", required=True)
     args = parser.parse_args()

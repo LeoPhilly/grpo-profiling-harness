@@ -52,9 +52,10 @@ class TrainConfig:
     prompts_per_step: int = 2
     # Trainer-forward chunk size along B (gradient accumulation). The full
     # step batch (prompts_per_step * group_size sequences) OOMed at 1.5B on
-    # 40GB from activation memory; gradients are mathematically identical to
+    # 40GB from activation memory (8 still OOMed at steady state once Adam
+    # moments were resident); gradients are mathematically identical to
     # full-batch (see forward_loss_phase).
-    micro_batch_size: int = 8
+    micro_batch_size: int = 4
     max_steps: int = 2
     lr: float = 1e-5
     seed: int = 0
@@ -195,6 +196,26 @@ def optimizer_phase(optimizer):
     optimizer.zero_grad(set_to_none=True)
 
 
+def preallocate_optimizer_state(optimizer):
+    """Force AdamW's moment buffers into memory before step 0.
+
+    AdamW allocates exp_avg/exp_avg_sq lazily at the first step(), so step 0
+    ran with ~12GB more headroom than every later step — its memory picture
+    lied, and step 1 OOMed. Mirror the lazy init exactly (zero moments, zero
+    step counter): the first real step() then behaves identically.
+
+    Deliberately NOT a zero-grad warmup step(): AdamW's decoupled weight
+    decay shrinks weights even at zero gradient, and the extra step count
+    would shift bias correction for the whole run.
+    """
+    for group in optimizer.param_groups:
+        for p in group["params"]:
+            state = optimizer.state[p]
+            state["step"] = torch.tensor(0.0)
+            state["exp_avg"] = torch.zeros_like(p)
+            state["exp_avg_sq"] = torch.zeros_like(p)
+
+
 def log_phase(metrics, step):
     wandb.log(metrics, step=step)
 
@@ -216,6 +237,9 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
     ).to(device)
     model.train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
+    # Step 0's memory picture must equal steady state (lazy Adam alloc made
+    # step 0 lie about headroom; step 1 OOMed).
+    preallocate_optimizer_state(optimizer)
 
     run = wandb.init(
         project=cfg.wandb_project, mode=cfg.wandb_mode, config=asdict(cfg)

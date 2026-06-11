@@ -193,6 +193,35 @@ def test_config_defaults_match_locked_decisions():
     cfg = TrainConfig()
     assert cfg.model_dtype == "bfloat16"  # R0 baseline trainer dtype
     assert cfg.gpu_memory_utilization == 0.3  # R2 starting split
+    assert cfg.micro_batch_size == 4  # 8 OOMed at 1.5B steady state
+
+
+def test_adam_preallocation_is_side_effect_free():
+    """Pre-allocated Adam state must produce EXACTLY the trajectory lazy
+    allocation produces — same grads in, bit-identical weights out. (A
+    zero-grad warmup step() fails this: weight decay + step-count shift.)"""
+    torch.manual_seed(0)
+    model_lazy = torch.nn.Linear(8, 8)
+    model_pre = torch.nn.Linear(8, 8)
+    model_pre.load_state_dict(model_lazy.state_dict())
+
+    opt_lazy = torch.optim.AdamW(model_lazy.parameters(), lr=1e-2)
+    opt_pre = torch.optim.AdamW(model_pre.parameters(), lr=1e-2)
+    train_loop_module.preallocate_optimizer_state(opt_pre)
+
+    # State exists up front (the memory effect we want)...
+    assert all(len(opt_pre.state[p]) > 0 for p in model_pre.parameters())
+    assert all(len(opt_lazy.state[p]) == 0 for p in model_lazy.parameters())
+
+    # ...and two real steps with identical grads give bit-identical weights.
+    for _ in range(2):
+        x = torch.randn(4, 8)
+        for model, opt in ((model_lazy, opt_lazy), (model_pre, opt_pre)):
+            opt.zero_grad(set_to_none=True)
+            model(x).pow(2).sum().backward()
+            opt.step()
+    for p_lazy, p_pre in zip(model_lazy.parameters(), model_pre.parameters()):
+        assert torch.equal(p_lazy, p_pre)
 
 
 def test_build_batch_takes_no_tokenizer():
