@@ -41,18 +41,25 @@ class VLLMGenerator:
         self,
         model_name: str,
         max_tokens: int = 256,
-        gpu_memory_utilization: float = 0.45,
+        gpu_memory_utilization: float = 0.3,
         temperature: float = 1.0,
         seed: int = 0,
     ):
         self.max_tokens = max_tokens
         self.temperature = temperature
-        # Constructor kwargs accepted by vllm 0.8.5 (the run reached engine
-        # startup before the fork crash). VERIFY-ON-GPU: full in-process
-        # startup after the VLLM_ENABLE_V1_MULTIPROCESSING=0 fix above.
+        # Memory coexistence (R2): vLLM preallocates this fraction of the card
+        # as KV cache — its default 0.9 grabbed ~36GB of the A100's 40GB and
+        # OOMed the trainer. 0.3 is a deliberately conservative starting split;
+        # the vLLM/trainer split is itself a measured variable on the R2 rung,
+        # so it is exposed here and on TrainConfig, never hardcoded deeper.
+        # enforce_eager: locked decision — no torch.compile / CUDA graph
+        # capture inside the engine (the first run showed both had run).
+        # Constructor kwargs accepted by vllm 0.8.5. VERIFY-ON-GPU: full
+        # in-process startup after the VLLM_ENABLE_V1_MULTIPROCESSING=0 fix.
         self.llm = LLM(
             model=model_name,
             gpu_memory_utilization=gpu_memory_utilization,
+            enforce_eager=True,
             seed=seed,
         )
 

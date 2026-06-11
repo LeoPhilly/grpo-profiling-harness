@@ -13,7 +13,6 @@ logprobs stay aligned 1:1 with the tokens the loss sees.
 from dataclasses import asdict, dataclass
 
 import torch
-import torch.nn.functional as F
 import wandb
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -24,7 +23,7 @@ from grpo.instrumentation.timing import (
     PhaseTimer,
     to_wandb_metrics,
 )
-from grpo.loss import grpo_loss
+from grpo.loss import grpo_loss_from_token_logprobs, shifted_token_logprobs
 from grpo.rewards.gsm8k import gsm8k_reward
 
 
@@ -37,6 +36,9 @@ class TrainConfig:
     max_steps: int = 2
     lr: float = 1e-5
     seed: int = 0
+    # vLLM/trainer memory split (R2 rung) — consumed by whoever constructs
+    # the VLLMGenerator; FakeGenerator ignores it.
+    gpu_memory_utilization: float = 0.3
     wandb_project: str = "grpo-profiling"
     wandb_mode: str = "offline"
 
@@ -101,28 +103,30 @@ def build_batch_phase(prompt_token_ids, outs, group_size, pad_token_id, device):
     }
 
 
-def logprob_identity(logits, batch):
+def logprob_identity(token_logprobs, batch):
     """Standing check #1: mean log-ratio (trainer recompute - behavior) over
     completion tokens. ~0 on the first inner step when generation is truly
     on-policy (~0.01 is bf16/engine numerics; ~0.3 is a bug). With
-    FakeGenerator the value is meaningless — only the plumbing is exercised."""
+    FakeGenerator the value is meaningless — only the plumbing is exercised.
+
+    Consumes the step's shared token logprobs (see shifted_token_logprobs) —
+    recomputing a full-vocab log_softmax here OOMed the first GPU run."""
     with torch.no_grad():
-        logprobs = F.log_softmax(logits[:, :-1], dim=-1)
-        targets = batch["input_ids"][:, 1:]
-        recomputed = logprobs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-        mask = batch["completion_mask"][:, 1:].to(logits.dtype)
+        mask = batch["completion_mask"][:, 1:].to(token_logprobs.dtype)
         behavior = batch["behavior_logprobs"][:, 1:]
-        return (((recomputed - behavior) * mask).sum() / mask.sum()).item()
+        return (((token_logprobs - behavior) * mask).sum() / mask.sum()).item()
 
 
 def forward_loss_phase(model, batch, advantages):
     logits = model(
         input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]
     ).logits
-    loss = grpo_loss(
-        logits, batch["input_ids"], batch["completion_mask"], advantages
+    # The one full-vocab log_softmax of the step, shared by loss and identity.
+    token_logprobs = shifted_token_logprobs(logits, batch["input_ids"])
+    loss = grpo_loss_from_token_logprobs(
+        token_logprobs, batch["completion_mask"], advantages
     )
-    identity = logprob_identity(logits, batch)
+    identity = logprob_identity(token_logprobs, batch)
     return loss, identity
 
 

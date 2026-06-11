@@ -2,6 +2,34 @@ import torch
 import torch.nn.functional as F
 
 
+def shifted_token_logprobs(logits: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+    """(B, T-1) logprob of each actually-present next token: logits[:, :-1]
+    scoring input_ids[:, 1:] (the shifted/target frame).
+
+    This is the ONE full-vocab log_softmax of the step. The loss and the
+    logprob-identity check (standing check #1) must both consume this result:
+    a second log_softmax over (B, T, V) duplicates gigabytes of peak memory
+    at real vocab sizes (caused the first GPU OOM)."""
+    logprobs = F.log_softmax(logits[:, :-1, :], dim=-1)
+    return logprobs.gather(-1, input_ids[:, 1:].unsqueeze(-1)).squeeze(-1)
+
+
+def grpo_loss_from_token_logprobs(
+    token_logprobs: torch.Tensor,
+    completion_mask: torch.Tensor,
+    advantages: torch.Tensor,
+) -> torch.Tensor:
+    """Loss from already-gathered token logprobs (see shifted_token_logprobs).
+    Math is identical to grpo_loss; the split exists only to share the
+    log_softmax with the identity check."""
+    mask = completion_mask[:, 1:].to(token_logprobs.dtype)
+    denom = mask.sum()
+    if denom == 0:
+        # 0/0 would silently feed NaN into a training run; refuse instead.
+        raise ValueError("completion_mask selects no tokens in the shifted frame")
+    return -(advantages[:, None] * token_logprobs * mask).sum() / denom
+
+
 def grpo_loss(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
@@ -31,13 +59,6 @@ def grpo_loss(
     if advantages.shape != (B,):
         raise ValueError(f"advantages shape {tuple(advantages.shape)} != {(B,)}")
 
-    targets = input_ids[:, 1:]
-    mask = completion_mask[:, 1:].to(logits.dtype)
-    denom = mask.sum()
-    if denom == 0:
-        # 0/0 would silently feed NaN into a training run; refuse instead.
-        raise ValueError("completion_mask selects no tokens in the shifted frame")
-
-    logprobs = F.log_softmax(logits[:, :-1, :], dim=-1)
-    token_logprob = logprobs.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
-    return -(advantages[:, None] * token_logprob * mask).sum() / denom
+    return grpo_loss_from_token_logprobs(
+        shifted_token_logprobs(logits, input_ids), completion_mask, advantages
+    )

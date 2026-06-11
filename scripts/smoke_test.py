@@ -53,7 +53,10 @@ def main():
     else:
         from grpo.rollout.vllm_generator import VLLMGenerator  # GPU box only
 
-        generator = VLLMGenerator(model_name=model_name)
+        generator = VLLMGenerator(
+            model_name=model_name,
+            gpu_memory_utilization=cfg.gpu_memory_utilization,
+        )
 
     pairs = gsm8k_pairs("train")[: cfg.prompts_per_step * args.steps]
     history = train(cfg, generator, pairs)
