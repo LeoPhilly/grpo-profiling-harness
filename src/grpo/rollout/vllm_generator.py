@@ -87,5 +87,5 @@ class VLLMGenerator:
                 outs.append(
                     {"text": comp.text, "token_ids": token_ids, "logprobs": logprobs}
                 )
-        assert len(outs) == len(prompts) * group_size
+        assert len(outs) == len(prompt_token_ids) * group_size
         return outs
