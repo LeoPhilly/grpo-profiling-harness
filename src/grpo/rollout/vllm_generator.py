@@ -8,9 +8,20 @@ editing FakeGenerator. Pin the installed vllm version in the GPU box's
 requirements when it is first installed.
 """
 
+import os
+
+# vLLM V1 forks an EngineCore subprocess by default; the trainer process has
+# already initialized CUDA, and forking a CUDA-initialized parent crashes
+# (real traceback observed on the GPU box: vllm 0.8.5, A100 40GB). Force the
+# engine in-process instead. In-process is also required for the cheap
+# in-place weight-sync path (R1). Must be set before any vllm import.
+os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
 try:
-    from vllm import LLM, SamplingParams  # VERIFY-ON-GPU: import path
-    from vllm.inputs import TokensPrompt  # VERIFY-ON-GPU: moved across versions
+    # Imports VERIFIED on GPU box (vllm 0.8.5) — the crash happened later,
+    # at engine startup, so both import paths are confirmed real.
+    from vllm import LLM, SamplingParams
+    from vllm.inputs import TokensPrompt
 except ImportError as e:
     raise ImportError(
         "vllm is not installed. VLLMGenerator only runs on the GPU box; "
@@ -36,7 +47,9 @@ class VLLMGenerator:
     ):
         self.max_tokens = max_tokens
         self.temperature = temperature
-        # VERIFY-ON-GPU: LLM constructor kwargs
+        # Constructor kwargs accepted by vllm 0.8.5 (the run reached engine
+        # startup before the fork crash). VERIFY-ON-GPU: full in-process
+        # startup after the VLLM_ENABLE_V1_MULTIPROCESSING=0 fix above.
         self.llm = LLM(
             model=model_name,
             gpu_memory_utilization=gpu_memory_utilization,
