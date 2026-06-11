@@ -19,7 +19,44 @@ import torch  # noqa: E402
 
 from grpo.data.gsm8k_data import gsm8k_pairs  # noqa: E402
 from grpo.instrumentation.timing import TIMING_RESIDUAL_KEY  # noqa: E402
+from grpo.rewards.gsm8k import gsm8k_reward  # noqa: E402
+from grpo.rewards.verl_gsm8k import extract_solution  # noqa: E402
 from grpo.train_loop import TrainConfig, train  # noqa: E402
+
+
+class _DumpFirstStep:
+    """Pass-through generator wrapper that prints the first N completions of
+    step 0 exactly as training sees them (standing check #3: read the raw
+    completions; curves are never evidence)."""
+
+    def __init__(self, inner, tokenizer, n):
+        self.inner = inner
+        self.tokenizer = tokenizer
+        self.n = n
+        self._dumped = False
+
+    def sync_weights(self, model):
+        self.inner.sync_weights(model)
+
+    def generate(self, prompt_token_ids, group_size, ground_truths=None):
+        outs = self.inner.generate(
+            prompt_token_ids, group_size, ground_truths=ground_truths
+        )
+        if not self._dumped:
+            self._dumped = True
+            print("=== DUMP: step-0 rendered prompt (first of batch) ===")
+            print(self.tokenizer.decode(prompt_token_ids[0]))
+            for k, out in enumerate(outs[: self.n]):
+                gt = ground_truths[k // group_size] if ground_truths else None
+                extracted = extract_solution(out["text"], method="strict")
+                print(f"--- completion {k} (prompt {k // group_size}) ---")
+                print(out["text"])
+                print(
+                    f">>> extracted={extracted!r} ground_truth={gt!r} "
+                    f"reward={gsm8k_reward(out['text'], gt)}"
+                )
+            print("=== END DUMP ===")
+        return outs
 
 
 def main():
@@ -27,6 +64,14 @@ def main():
     parser.add_argument("--generator", choices=["fake", "vllm"], default="fake")
     parser.add_argument("--steps", type=int, default=3)
     parser.add_argument("--model", default=None)
+    parser.add_argument(
+        "--dump",
+        type=int,
+        default=0,
+        metavar="N",
+        help="print prompt + first N raw completions of step 0 with "
+        "extracted answer / ground truth / reward (standing check #3)",
+    )
     args = parser.parse_args()
 
     # The one device decision point.
@@ -44,12 +89,13 @@ def main():
         wandb_mode="offline",
     )
 
-    if args.generator == "fake":
-        from transformers import AutoTokenizer
+    from transformers import AutoTokenizer
 
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if args.generator == "fake":
         from grpo.rollout.fake_generator import FakeGenerator
 
-        generator = FakeGenerator(AutoTokenizer.from_pretrained(model_name))
+        generator = FakeGenerator(tokenizer)
     else:
         from grpo.rollout.vllm_generator import VLLMGenerator  # GPU box only
 
@@ -57,6 +103,8 @@ def main():
             model_name=model_name,
             gpu_memory_utilization=cfg.gpu_memory_utilization,
         )
+    if args.dump > 0:
+        generator = _DumpFirstStep(generator, tokenizer, args.dump)
 
     pairs = gsm8k_pairs("train")[: cfg.prompts_per_step * args.steps]
     history = train(cfg, generator, pairs)
