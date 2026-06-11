@@ -92,7 +92,13 @@ class VLLMGenerator:
                     for tid, pos in zip(token_ids, comp.logprobs)
                 ]
                 outs.append(
-                    {"text": comp.text, "token_ids": token_ids, "logprobs": logprobs}
+                    {
+                        "text": comp.text,
+                        "token_ids": token_ids,
+                        "logprobs": logprobs,
+                        # VERIFY-ON-GPU: finish_reason "length" == hit max_tokens
+                        "truncated": comp.finish_reason == "length",
+                    }
                 )
         assert len(outs) == len(prompt_token_ids) * group_size
         return outs

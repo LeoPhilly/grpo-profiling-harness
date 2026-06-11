@@ -13,6 +13,7 @@ Every run of this script is paid GPU time: add the costs.md row.
 import argparse
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -93,6 +94,20 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    dumps_dir = Path(__file__).resolve().parent.parent / "results" / "dumps"
+    dumps_dir.mkdir(parents=True, exist_ok=True)
+    dump_path = dumps_dir / f"{args.run_name}.txt"
+    anomaly_path = dumps_dir / f"{args.run_name}-anomalies.txt"
+    # Appended blocks from retries of the same run name must be
+    # distinguishable when reading the artifacts later.
+    start_header = (
+        f"=== run start ({args.run_name}, "
+        f"{datetime.now().isoformat(timespec='seconds')}) ===\n"
+    )
+    for path in (dump_path, anomaly_path):
+        with open(path, "a") as f:
+            f.write(start_header)
+
     cfg = TrainConfig(
         model_name=args.model,
         device=device,
@@ -101,6 +116,7 @@ def main():
         max_steps=args.steps,
         gpu_memory_utilization=args.gpu_mem_util,
         micro_batch_size=args.micro_batch_size,
+        anomaly_dump_path=str(anomaly_path),
         wandb_mode="online",
     )
 
@@ -116,13 +132,6 @@ def main():
         gpu_memory_utilization=args.gpu_mem_util,
     )
 
-    dump_path = (
-        Path(__file__).resolve().parent.parent
-        / "results"
-        / "dumps"
-        / f"{args.run_name}.txt"
-    )
-    dump_path.parent.mkdir(parents=True, exist_ok=True)
     generator = _PeriodicDump(generator, dump_path)
 
     pairs = gsm8k_pairs("train")[: cfg.prompts_per_step * cfg.max_steps]

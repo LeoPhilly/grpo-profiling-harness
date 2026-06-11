@@ -28,6 +28,7 @@ from grpo.advantages import compute_group_advantages
 from grpo.data.gsm8k_data import iter_prompt_batches, render_prompt
 from grpo.instrumentation.timing import (
     TOKENS_PER_SEC_GENERATE_KEY,
+    WALL_CLOCK,
     PhaseTimer,
     to_wandb_metrics,
 )
@@ -62,6 +63,12 @@ class TrainConfig:
     # vLLM/trainer memory split (R2 rung) — consumed by whoever constructs
     # the VLLMGenerator; FakeGenerator ignores it.
     gpu_memory_utilization: float = 0.3
+    # Standing-check-#1 tripwire: when |mean identity| exceeds the threshold,
+    # the full batch is appended to anomaly_dump_path immediately (r0's
+    # 15-step excursion fell between the every-25-step dumps). Empty path
+    # disables the dump (FakeGenerator's identity is meaningless by design).
+    anomaly_threshold: float = 0.5
+    anomaly_dump_path: str = ""
     wandb_project: str = "grpo-profiling"
     wandb_mode: str = "offline"
 
@@ -131,17 +138,26 @@ def build_batch_phase(prompt_token_ids, outs, group_size, pad_token_id, device):
 
 
 def logprob_identity(token_logprobs, batch):
-    """Standing check #1: mean log-ratio (trainer recompute - behavior) over
+    """Standing check #1: log-ratio (trainer recompute - behavior) over
     completion tokens. ~0 on the first inner step when generation is truly
     on-policy (~0.01 is bf16/engine numerics; ~0.3 is a bug). With
     FakeGenerator the value is meaningless — only the plumbing is exercised.
+
+    Returns (mean, per_sequence, valid): mean is the token-weighted mean over
+    the whole batch (semantics unchanged from r0); per_sequence (B,) holds
+    each sequence's own mean log-ratio — its extremes localize whether one
+    sequence or the whole batch diverges; valid flags sequences with at
+    least one completion token.
 
     Consumes the step's shared token logprobs (see shifted_token_logprobs) —
     recomputing a full-vocab log_softmax here OOMed the first GPU run."""
     with torch.no_grad():
         mask = batch["completion_mask"][:, 1:].to(token_logprobs.dtype)
-        behavior = batch["behavior_logprobs"][:, 1:]
-        return (((token_logprobs - behavior) * mask).sum() / mask.sum()).item()
+        diff = (token_logprobs - batch["behavior_logprobs"][:, 1:]) * mask
+        seq_tokens = mask.sum(dim=1)
+        mean = (diff.sum() / seq_tokens.sum()).item()
+        per_sequence = diff.sum(dim=1) / seq_tokens.clamp(min=1)
+        return mean, per_sequence, seq_tokens > 0
 
 
 def forward_loss_phase(model, batch, advantages, micro_batch_size):
@@ -185,8 +201,8 @@ def forward_loss_phase(model, batch, advantages, micro_batch_size):
             aggregate_loss += weighted.detach()
         chunk_logprobs.append(token_logprobs.detach())
 
-    identity = logprob_identity(torch.cat(chunk_logprobs, dim=0), batch)
-    return aggregate_loss, identity
+    identity_stats = logprob_identity(torch.cat(chunk_logprobs, dim=0), batch)
+    return aggregate_loss, identity_stats
 
 
 def optimizer_phase(optimizer):
@@ -218,6 +234,28 @@ def preallocate_optimizer_state(optimizer):
 
 def log_phase(metrics, step):
     wandb.log(metrics, step=step)
+
+
+def dump_anomaly_step(
+    path, step, identity_mean, outs, ground_truths, per_sequence, valid, group_size
+):
+    """Standing-check-#1 tripwire payload: the full batch the moment the
+    threshold is crossed, so transient excursions (r0: ~15 steps, gone before
+    the next periodic dump) leave their completions behind for reading."""
+    with open(path, "a") as f:
+        f.write(
+            f"\n===== ANOMALY step {step}: mean identity {identity_mean:.4f} =====\n"
+        )
+        for i, out in enumerate(outs):
+            seq_logratio = per_sequence[i].item() if valid[i] else float("nan")
+            f.write(
+                f"--- completion {i} (prompt {i // group_size}) | "
+                f"seq_logratio={seq_logratio:.4f} | "
+                f"tokens={len(out['token_ids'])} | "
+                f"truncated={out.get('truncated', False)} | "
+                f"gt={ground_truths[i // group_size]!r} ---\n"
+            )
+            f.write(out["text"] + "\n")
 
 
 # --- the loop ---
@@ -282,7 +320,7 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
             )
         with timer.phase("forward_loss"):
             # Includes per-chunk backward (inherent to accumulation).
-            loss, identity = forward_loss_phase(
+            loss, (identity, identity_per_seq, identity_valid) = forward_loss_phase(
                 model, batch, advantages, cfg.micro_batch_size
             )
         with timer.phase("optimizer"):
@@ -293,14 +331,25 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
         summary = timer.step_summary()
 
         completion_tokens = int(batch["completion_mask"].sum().item())
+        # Per-sequence extremes localize an excursion: one bad sequence vs
+        # the whole batch drifting.
+        seq_logratios = identity_per_seq[identity_valid]
+        identity_min = seq_logratios.min().item() if seq_logratios.numel() else 0.0
+        identity_max = seq_logratios.max().item() if seq_logratios.numel() else 0.0
+        truncated = [bool(out.get("truncated", False)) for out in outs]
         metrics = {
             "train/loss": loss.item(),
             "train/reward_mean": rewards.mean().item(),
             # GRPO can't bootstrap from all-zero groups; format compliance is
             # the leading indicator of that failure mode at small scale.
             "train/format_rate": format_rate,
+            # Truncation (hit max_new_tokens) is the lead suspect for the r0
+            # identity excursion; vLLM reports it via finish_reason.
+            "train/truncated_frac": sum(truncated) / len(truncated),
             "train/completion_tokens": completion_tokens,
             "check/logprob_identity": identity,
+            "check/logprob_identity_min": identity_min,
+            "check/logprob_identity_max": identity_max,
             # Util alone is deceptive; tokens/sec of useful work is the
             # number that has to accompany any utilization claim.
             TOKENS_PER_SEC_GENERATE_KEY: completion_tokens / summary["generate"],
@@ -311,6 +360,27 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
                 torch.cuda.max_memory_allocated(device) / 1024**3  # GiB
             )
         log_phase(metrics, step)
+        # Tripwire AFTER logging so a dump failure can't lose the metrics.
+        if cfg.anomaly_dump_path and abs(identity) > cfg.anomaly_threshold:
+            dump_anomaly_step(
+                cfg.anomaly_dump_path,
+                step,
+                identity,
+                outs,
+                ground_truths,
+                identity_per_seq,
+                identity_valid,
+                cfg.group_size,
+            )
+        print(
+            f"step {step + 1}/{cfg.max_steps} | "
+            f"reward {metrics['train/reward_mean']:.2f} | "
+            f"format {metrics['train/format_rate']:.2f} | "
+            f"gen {summary['generate']:.1f}s | "
+            f"wall {summary[WALL_CLOCK]:.1f}s | "
+            f"identity {identity:.3f}",
+            flush=True,
+        )
         history.append(metrics)
         step += 1
 

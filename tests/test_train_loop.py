@@ -70,10 +70,11 @@ class _RecordingWandb:
         self.logged.append(dict(metrics))
 
 
-def test_two_steps_end_to_end(monkeypatch):
+def test_two_steps_end_to_end(monkeypatch, tmp_path, capsys):
     recorder = _RecordingWandb()
     monkeypatch.setattr(train_loop_module, "wandb", recorder)
 
+    anomaly_path = tmp_path / "anomalies.txt"
     cfg = TrainConfig(
         model_name=TINY_MODEL,
         device="cpu",
@@ -82,6 +83,10 @@ def test_two_steps_end_to_end(monkeypatch):
         prompts_per_step=2,
         max_steps=2,
         lr=1e-4,
+        # FakeGenerator's identity is ~-9 by construction: every step trips
+        # the 0.5 threshold, which IS the injected-failure validation of the
+        # anomaly tripwire.
+        anomaly_dump_path=str(anomaly_path),
     )
     tokenizer = AutoTokenizer.from_pretrained(TINY_MODEL)
     generator = _SpyFakeGenerator(tokenizer, completion_tokens=(6, 12), seed=0)
@@ -119,6 +124,27 @@ def test_two_steps_end_to_end(monkeypatch):
         assert math.isfinite(logged[TIMING_RESIDUAL_KEY])
         assert abs(logged[TIMING_RESIDUAL_KEY]) < 0.05
 
+    # New identity stats: token-weighted mean bracketed by the per-sequence
+    # extremes; FakeGenerator never truncates, so truncated_frac is exactly 0.
+    for m in history:
+        assert m["check/logprob_identity_min"] <= m["check/logprob_identity"]
+        assert m["check/logprob_identity"] <= m["check/logprob_identity_max"]
+        assert m["train/truncated_frac"] == 0.0
+
+    # Anomaly tripwire fired on both steps (injected failure: fake identity
+    # ~-9 vs threshold 0.5), capturing every completion with its stats.
+    anomaly_text = anomaly_path.read_text()
+    assert anomaly_text.count("===== ANOMALY step") == 2
+    assert anomaly_text.count("--- completion") == 16  # 8 per step
+    assert "seq_logratio=" in anomaly_text
+    assert "truncated=False" in anomaly_text
+    assert "tokens=" in anomaly_text
+
+    # Per-step stdout line, built from the metrics dict.
+    out = capsys.readouterr().out
+    assert "step 1/2 | reward 0.50 | format 1.00 | gen " in out
+    assert "| identity -9." in out
+
     # Single-tokenization invariant: the generator received exactly the
     # token ids render_prompt produces — never prompt text.
     assert len(generator.received_prompts) == 2  # one call per step
@@ -128,6 +154,26 @@ def test_two_steps_end_to_end(monkeypatch):
     for batch in generator.received_prompts:
         for ids in batch:
             assert all(isinstance(t, int) for t in ids)
+
+
+def test_anomaly_tripwire_respects_threshold(monkeypatch, tmp_path):
+    # Negative control: threshold far above the fake's ~9 -> no dump at all.
+    recorder = _RecordingWandb()
+    monkeypatch.setattr(train_loop_module, "wandb", recorder)
+    anomaly_path = tmp_path / "anomalies.txt"
+    cfg = TrainConfig(
+        model_name=TINY_MODEL,
+        device="cpu",
+        model_dtype="float32",
+        group_size=4,
+        prompts_per_step=2,
+        max_steps=1,
+        anomaly_threshold=1e6,
+        anomaly_dump_path=str(anomaly_path),
+    )
+    tokenizer = AutoTokenizer.from_pretrained(TINY_MODEL)
+    train(cfg, FakeGenerator(tokenizer, completion_tokens=(6, 12), seed=0), PAIRS)
+    assert not anomaly_path.exists()
 
 
 def test_grad_accum_exactly_matches_full_batch():
@@ -152,17 +198,20 @@ def test_grad_accum_exactly_matches_full_batch():
 
     def run(micro_batch_size):
         model.zero_grad(set_to_none=True)
-        loss, identity = forward_loss_phase(model, batch, advantages, micro_batch_size)
+        loss, (identity, per_seq, valid) = forward_loss_phase(
+            model, batch, advantages, micro_batch_size
+        )
         grads = [
             None if p.grad is None else p.grad.clone() for p in model.parameters()
         ]
-        return loss, identity, grads
+        return loss, identity, per_seq[valid], grads
 
-    loss_full, identity_full, grads_full = run(6)  # one chunk = full batch
-    loss_chunked, identity_chunked, grads_chunked = run(2)  # 3 unequal chunks
+    loss_full, identity_full, per_seq_full, grads_full = run(6)  # full batch
+    loss_chunked, identity_chunked, per_seq_chunked, grads_chunked = run(2)
 
     assert torch.allclose(loss_chunked, loss_full, atol=1e-6)
     assert abs(identity_chunked - identity_full) < 1e-6
+    assert torch.allclose(per_seq_chunked, per_seq_full, atol=1e-6)
     for g_full, g_chunked in zip(grads_full, grads_chunked):
         assert (g_full is None) == (g_chunked is None)
         if g_full is not None:

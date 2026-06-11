@@ -59,6 +59,9 @@ class FakeGenerator:
                         "text": self.tokenizer.decode(token_ids),
                         "token_ids": token_ids,
                         "logprobs": logprobs,
+                        # Interface conformance, not realism: the fake never
+                        # truncates, so the metric reads exactly 0.0.
+                        "truncated": False,
                     }
                 )
         return outs
