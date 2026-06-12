@@ -1,0 +1,23 @@
+metric,mean,std,p10,p90,share_of_wall_pct
+time/build_batch,0.005487,0.000496,0.004835,0.006126,0.059
+time/forward_loss,1.644735,0.166014,1.344795,1.786261,17.727
+time/generate,7.55962,0.870169,5.752666,8.095553,81.478
+time/optimizer,0.053711,0.00012,0.053578,0.053862,0.579
+time/render,0.002305,0.000129,0.00213,0.00247,0.025
+time/reward,0.00059,0.000135,0.000431,0.000819,0.006
+time/sync_weights,0.011307,0.000135,0.011119,0.01148,0.122
+time/wall_clock,9.27809,1.030822,7.135055,9.939224,
+var_share/time/build_batch,0.0,,,,
+var_share/time/forward_loss,2.594,,,,
+var_share/time/generate,71.259,,,,
+var_share/time/optimizer,0.0,,,,
+var_share/time/render,0.0,,,,
+var_share/time/reward,0.0,,,,
+var_share/time/sync_weights,0.0,,,,
+var_share/covariance remainder,26.147,,,,
+time/tokens_per_sec_generate,1194.704282,,,,
+train/reward_mean,0.69,,,,
+train/format_rate,0.939375,,,,
+n_steps,50,,,,
+window,"[50,100)",,,,
+mean_abs_timing_residual,3.7e-05,,,,

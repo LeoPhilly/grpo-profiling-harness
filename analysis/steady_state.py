@@ -19,11 +19,22 @@ RESIDUAL = "check/timing_residual_frac"
 SCALARS = (TPS, "train/reward_mean", "train/format_rate")
 
 
+def percentile(sorted_vals, q):
+    """Nearest-rank-ish percentile on a pre-sorted list."""
+    return sorted_vals[int(q * (len(sorted_vals) - 1))]
+
+
 def aggregate_window(rows, start_step, end_step):
     """Pure aggregation over history rows (dicts with _step). Returns
-    (table, scalars, n_steps, time_span, mean_abs_residual) where table rows
-    are (key, mean, std, share_of_wall_pct_or_None). TPS is a rate, not a
-    phase, so it gets no wall share."""
+    (table, scalars, n_steps, time_span, mean_abs_residual, var_decomp).
+    Table rows are (key, mean, std, p10, p90, share_of_wall_pct_or_None);
+    TPS is a rate, not a phase, so it gets no wall share.
+
+    var_decomp answers "where does wall-clock variance come from": rows of
+    (phase, 100*var(phase)/var(wall)) plus a final ("covariance remainder",
+    pct) so the section sums to 100 — phase variances alone miss the
+    cross-covariance (correlated phases) and untimed-gap contributions.
+    None when var(wall) is ~0."""
     window = [
         r
         for r in rows
@@ -41,12 +52,28 @@ def aggregate_window(rows, start_step, end_step):
     time_keys.sort(key=lambda k: k == WALL)  # wall_clock printed last
     table = []
     for key in time_keys:
-        vals = series[key]
+        vals = sorted(series[key])
         share = None
         if key != WALL and wall_mean:
             share = 100.0 * statistics.fmean(vals) / wall_mean
         std = statistics.stdev(vals) if len(vals) > 1 else 0.0
-        table.append((key, statistics.fmean(vals), std, share))
+        table.append(
+            (key, statistics.fmean(vals), std,
+             percentile(vals, 0.1), percentile(vals, 0.9), share)
+        )
+
+    var_decomp = None
+    wall_vals = series.get(WALL, [])
+    if len(wall_vals) > 1 and statistics.variance(wall_vals) > 1e-12:
+        wall_var = statistics.variance(wall_vals)
+        var_decomp = [
+            (key, 100.0 * statistics.variance(series[key]) / wall_var)
+            for key in time_keys
+            if key != WALL and len(series[key]) > 1
+        ]
+        var_decomp.append(
+            ("covariance remainder", 100.0 - sum(pct for _, pct in var_decomp))
+        )
 
     scalars = {k: statistics.fmean(series[k]) for k in SCALARS if k in series}
     mean_abs_residual = (
@@ -56,7 +83,7 @@ def aggregate_window(rows, start_step, end_step):
     )
     timestamps = [r["_timestamp"] for r in window if "_timestamp" in r]
     span = (min(timestamps), max(timestamps)) if timestamps else None
-    return table, scalars, len(window), span, mean_abs_residual
+    return table, scalars, len(window), span, mean_abs_residual, var_decomp
 
 
 def main():
@@ -71,7 +98,7 @@ def main():
 
     run = wandb.Api().run(args.run)
     rows = list(run.scan_history())
-    table, scalars, n, span, mean_abs_residual = aggregate_window(
+    table, scalars, n, span, mean_abs_residual, var_decomp = aggregate_window(
         rows, args.start_step, args.end_step
     )
     if n == 0:
@@ -81,10 +108,23 @@ def main():
         f"steady state: steps [{args.start_step}, {args.end_step}) "
         f"-> {n} steps of {args.run}"
     )
-    print(f"{'metric':<34} {'mean_s':>9} {'std_s':>9} {'% of wall':>10}")
-    for key, mean, std, share in table:
+    print(
+        f"{'metric':<34} {'mean_s':>9} {'std_s':>9} "
+        f"{'p10_s':>9} {'p90_s':>9} {'% of wall':>10}"
+    )
+    for key, mean, std, p10, p90, share in table:
         share_str = f"{share:.1f}" if share is not None else "-"
-        print(f"{key:<34} {mean:>9.3f} {std:>9.3f} {share_str:>10}")
+        print(
+            f"{key:<34} {mean:>9.3f} {std:>9.3f} "
+            f"{p10:>9.3f} {p90:>9.3f} {share_str:>10}"
+        )
+
+    if var_decomp is not None:
+        print("\nwall-clock variance decomposition (var(phase)/var(wall), %):")
+        for key, pct in var_decomp:
+            print(f"  {key:<32} {pct:>6.1f}")
+    else:
+        print("\nwall-clock variance ~0 in window — variance decomposition skipped")
     if TPS in scalars:
         print(f"{TPS}: {scalars[TPS]:.1f}")
     for key in ("train/reward_mean", "train/format_rate"):
@@ -129,19 +169,24 @@ def main():
         out_path = out_dir / f"{run.name or 'run'}-{run_id}.csv"
         with open(out_path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["metric", "mean", "std", "share_of_wall_pct"])
-            for key, mean, std, share in table:
+            writer.writerow(
+                ["metric", "mean", "std", "p10", "p90", "share_of_wall_pct"]
+            )
+            for key, mean, std, p10, p90, share in table:
                 writer.writerow(
-                    [key, round(mean, 6), round(std, 6),
-                     "" if share is None else round(share, 3)]
+                    [key, round(mean, 6), round(std, 6), round(p10, 6),
+                     round(p90, 6), "" if share is None else round(share, 3)]
                 )
+            for key, pct in var_decomp or []:
+                writer.writerow([f"var_share/{key}", round(pct, 3), "", "", "", ""])
+            pad = ["", "", "", ""]
             for key, val in scalars.items():
-                writer.writerow([key, round(val, 6), "", ""])
-            writer.writerow(["n_steps", n, "", ""])
-            writer.writerow(["window", f"[{args.start_step},{args.end_step})", "", ""])
+                writer.writerow([key, round(val, 6)] + pad)
+            writer.writerow(["n_steps", n] + pad)
+            writer.writerow(["window", f"[{args.start_step},{args.end_step})"] + pad)
             if mean_abs_residual is not None:
                 writer.writerow(
-                    ["mean_abs_timing_residual", round(mean_abs_residual, 6), "", ""]
+                    ["mean_abs_timing_residual", round(mean_abs_residual, 6)] + pad
                 )
         print(f"wrote {out_path}")
 
