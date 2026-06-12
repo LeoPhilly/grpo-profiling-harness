@@ -30,6 +30,7 @@ from grpo.instrumentation.timing import (
     TOKENS_PER_SEC_GENERATE_KEY,
     WALL_CLOCK,
     PhaseTimer,
+    phase_wandb_key,
     to_wandb_metrics,
 )
 from grpo.loss import grpo_loss_from_token_logprobs, shifted_token_logprobs
@@ -160,7 +161,7 @@ def logprob_identity(token_logprobs, batch):
         return mean, per_sequence, seq_tokens > 0
 
 
-def forward_loss_phase(model, batch, advantages, micro_batch_size):
+def forward_loss_phase(model, batch, advantages, micro_batch_size, timer):
     """Chunked forward+backward along B (gradient accumulation).
 
     Each chunk's loss is weighted by chunk_completion_tokens /
@@ -168,11 +169,18 @@ def forward_loss_phase(model, batch, advantages, micro_batch_size):
     aggregate loss equal the full-batch token-mean EXACTLY. Mean-of-chunk-
     means would be wrong: chunks have unequal token counts.
 
-    backward() runs per chunk, inside this phase: that frees each chunk's
-    graph (and its full-vocab log_softmax buffer) before the next forward —
-    the whole point, since 1.5B OOMed on activations. Only the detached
-    (b, T-1) gathered logprobs are kept, concatenated for the identity
-    check (unchanged semantics). Returns (detached aggregate loss, identity).
+    backward() runs per chunk: that frees each chunk's graph (and its
+    full-vocab logsumexp buffers) before the next forward — the whole point,
+    since 1.5B OOMed on activations. Only the detached (b, T-1) gathered
+    logprobs are kept, concatenated for the identity check.
+
+    Timing: this function owns three timer sub-phases, accumulated across
+    chunks — "forward" (model to logits), "loss_compute" (gather + loss +
+    identity), "backward". It is NOT wrapped in an outer phase: nesting
+    would double-count time in the residual. time/forward_loss is logged
+    by the caller as the sum of the three, for continuity with r0.
+
+    Returns (detached aggregate loss, identity stats).
     """
     assert micro_batch_size >= 1
     B = batch["input_ids"].shape[0]
@@ -184,24 +192,30 @@ def forward_loss_phase(model, batch, advantages, micro_batch_size):
     chunk_logprobs = []
     for start in range(0, B, micro_batch_size):
         sl = slice(start, start + micro_batch_size)
-        logits = model(
-            input_ids=batch["input_ids"][sl],
-            attention_mask=batch["attention_mask"][sl],
-        ).logits
-        token_logprobs = shifted_token_logprobs(logits, batch["input_ids"][sl])
-        del logits  # the (b, T, V) tensor drives peak memory; drop it now
-        chunk_mask = batch["completion_mask"][sl]
-        chunk_tokens = chunk_mask[:, 1:].sum()
-        if chunk_tokens > 0:  # a chunk of all-empty completions contributes 0
-            chunk_loss = grpo_loss_from_token_logprobs(
-                token_logprobs, chunk_mask, advantages[sl]
-            )
-            weighted = chunk_loss * (chunk_tokens / total_tokens)
-            weighted.backward()  # accumulates grads; frees this chunk's graph
-            aggregate_loss += weighted.detach()
-        chunk_logprobs.append(token_logprobs.detach())
+        with timer.phase("forward"):
+            logits = model(
+                input_ids=batch["input_ids"][sl],
+                attention_mask=batch["attention_mask"][sl],
+            ).logits
+        with timer.phase("loss_compute"):
+            token_logprobs = shifted_token_logprobs(logits, batch["input_ids"][sl])
+            del logits  # the (b, T, V) tensor drives peak memory; drop it now
+            chunk_mask = batch["completion_mask"][sl]
+            chunk_tokens = chunk_mask[:, 1:].sum()
+            weighted = None
+            if chunk_tokens > 0:  # all-empty-completion chunk contributes 0
+                chunk_loss = grpo_loss_from_token_logprobs(
+                    token_logprobs, chunk_mask, advantages[sl]
+                )
+                weighted = chunk_loss * (chunk_tokens / total_tokens)
+            chunk_logprobs.append(token_logprobs.detach())
+        if weighted is not None:
+            with timer.phase("backward"):
+                weighted.backward()  # accumulates grads; frees chunk's graph
+                aggregate_loss += weighted.detach()
 
-    identity_stats = logprob_identity(torch.cat(chunk_logprobs, dim=0), batch)
+    with timer.phase("loss_compute"):
+        identity_stats = logprob_identity(torch.cat(chunk_logprobs, dim=0), batch)
     return aggregate_loss, identity_stats
 
 
@@ -318,11 +332,11 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
                 tokenizer.pad_token_id,
                 device,
             )
-        with timer.phase("forward_loss"):
-            # Includes per-chunk backward (inherent to accumulation).
-            loss, (identity, identity_per_seq, identity_valid) = forward_loss_phase(
-                model, batch, advantages, cfg.micro_batch_size
-            )
+        # Times its own forward/loss_compute/backward sub-phases (an outer
+        # phase here would double-count in the residual).
+        loss, (identity, identity_per_seq, identity_valid) = forward_loss_phase(
+            model, batch, advantages, cfg.micro_batch_size, timer
+        )
         with timer.phase("optimizer"):
             optimizer_phase(optimizer)
         # log_phase is NOT timed: it emits this step's own summary, and its
@@ -354,6 +368,11 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
             # number that has to accompany any utilization claim.
             TOKENS_PER_SEC_GENERATE_KEY: completion_tokens / summary["generate"],
             **to_wandb_metrics(summary),
+            # Derived sum, not a timer phase: continuity with the r0 gate
+            # run's time/forward_loss panel.
+            phase_wandb_key("forward_loss"): (
+                summary["forward"] + summary["loss_compute"] + summary["backward"]
+            ),
         }
         if device.type == "cuda":
             metrics[MEM_PEAK_KEY] = (

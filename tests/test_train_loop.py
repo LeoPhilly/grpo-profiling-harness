@@ -17,6 +17,7 @@ from grpo.instrumentation.timing import (
     TIMING_RESIDUAL_KEY,
     TOKENS_PER_SEC_GENERATE_KEY,
     WALL_CLOCK_KEY,
+    PhaseTimer,
     phase_wandb_key,
 )
 from grpo.rollout.fake_generator import FakeGenerator
@@ -28,7 +29,9 @@ TIMED_PHASES = (
     "generate",
     "reward",
     "build_batch",
-    "forward_loss",
+    "forward",
+    "loss_compute",
+    "backward",
     "optimizer",
 )
 
@@ -123,6 +126,12 @@ def test_two_steps_end_to_end(monkeypatch, tmp_path, capsys):
         assert logged[TOKENS_PER_SEC_GENERATE_KEY] > 0
         assert math.isfinite(logged[TIMING_RESIDUAL_KEY])
         assert abs(logged[TIMING_RESIDUAL_KEY]) < 0.05
+        # Continuity: time/forward_loss is the exact sum of its sub-phases.
+        assert logged[phase_wandb_key("forward_loss")] == (
+            logged[phase_wandb_key("forward")]
+            + logged[phase_wandb_key("loss_compute")]
+            + logged[phase_wandb_key("backward")]
+        )
 
     # New identity stats: token-weighted mean bracketed by the per-sequence
     # extremes; FakeGenerator never truncates, so truncated_frac is exactly 0.
@@ -198,8 +207,9 @@ def test_grad_accum_exactly_matches_full_batch():
 
     def run(micro_batch_size):
         model.zero_grad(set_to_none=True)
+        timer = PhaseTimer(use_cuda=False)
         loss, (identity, per_seq, valid) = forward_loss_phase(
-            model, batch, advantages, micro_batch_size
+            model, batch, advantages, micro_batch_size, timer
         )
         grads = [
             None if p.grad is None else p.grad.clone() for p in model.parameters()
