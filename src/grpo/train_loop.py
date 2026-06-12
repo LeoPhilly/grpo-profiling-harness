@@ -67,8 +67,11 @@ class TrainConfig:
     # the full batch is appended to anomaly_dump_path immediately (r0's
     # 15-step excursion fell between the every-25-step dumps). Empty path
     # disables the dump (FakeGenerator's identity is meaningless by design).
+    # The file is only created on the FIRST firing — no header-only files
+    # from clean runs; anomaly_dump_header is written at that moment.
     anomaly_threshold: float = 0.5
     anomaly_dump_path: str = ""
+    anomaly_dump_header: str = ""
     wandb_project: str = "grpo-profiling"
     wandb_mode: str = "offline"
 
@@ -252,12 +255,24 @@ def log_phase(metrics, step):
 
 
 def dump_anomaly_step(
-    path, step, identity_mean, outs, ground_truths, per_sequence, valid, group_size
+    path,
+    step,
+    identity_mean,
+    outs,
+    ground_truths,
+    per_sequence,
+    valid,
+    group_size,
+    header="",
 ):
     """Standing-check-#1 tripwire payload: the full batch the moment the
     threshold is crossed, so transient excursions (r0: ~15 steps, gone before
-    the next periodic dump) leave their completions behind for reading."""
+    the next periodic dump) leave their completions behind for reading.
+    header (the run-id line) is passed only on the run's first firing, so
+    the file is created lazily — clean runs leave no file at all."""
     with open(path, "a") as f:
+        if header:
+            f.write(header)
         f.write(
             f"\n===== ANOMALY step {step}: mean identity {identity_mean:.4f} =====\n"
         )
@@ -300,6 +315,7 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
     timer = PhaseTimer()
     history = []
     step = 0
+    anomaly_fired = False
     for batch_pairs in iter_prompt_batches(pairs, cfg.prompts_per_step):
         if step >= cfg.max_steps:
             break
@@ -353,6 +369,13 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
         identity_min = seq_logratios.min().item() if seq_logratios.numel() else 0.0
         identity_max = seq_logratios.max().item() if seq_logratios.numel() else 0.0
         truncated = [bool(out.get("truncated", False)) for out in outs]
+        # Straggler anatomy: at G completions per prompt, one long sequence
+        # holds the whole generate phase hostage; max/median is the
+        # straggler signal. Median is torch's lower-median (no interpolation).
+        completion_lens = torch.tensor(
+            [len(out["token_ids"]) for out in outs], dtype=torch.float32
+        )
+        len_median = completion_lens.median().item()
         metrics = {
             "train/loss": loss.item(),
             "train/reward_mean": rewards.mean().item(),
@@ -363,6 +386,12 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
             # identity excursion; vLLM reports it via finish_reason.
             "train/truncated_frac": sum(truncated) / len(truncated),
             "train/completion_tokens": completion_tokens,
+            "train/completion_len_max": completion_lens.max().item(),
+            "train/completion_len_median": len_median,
+            "train/completion_len_mean": completion_lens.mean().item(),
+            "train/straggler_ratio": (
+                completion_lens.max().item() / len_median if len_median > 0 else 0.0
+            ),
             "check/logprob_identity": identity,
             "check/logprob_identity_min": identity_min,
             "check/logprob_identity_max": identity_max,
@@ -387,7 +416,10 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
                 identity_per_seq,
                 identity_valid,
                 cfg.group_size,
+                # Run header once, at first firing — file created lazily.
+                header="" if anomaly_fired else cfg.anomaly_dump_header,
             )
+            anomaly_fired = True
         print(
             f"step {step + 1}/{cfg.max_steps} | "
             f"reward {metrics['train/reward_mean']:.2f} | "

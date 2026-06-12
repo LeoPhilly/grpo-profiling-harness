@@ -92,6 +92,7 @@ def test_two_steps_end_to_end(monkeypatch, tmp_path, capsys):
         # the 0.5 threshold, which IS the injected-failure validation of the
         # anomaly tripwire.
         anomaly_dump_path=str(anomaly_path),
+        anomaly_dump_header="=== run start (test-run) ===\n",
     )
     tokenizer = AutoTokenizer.from_pretrained(TINY_MODEL)
     generator = _SpyFakeGenerator(tokenizer, completion_tokens=(6, 12), seed=0)
@@ -147,6 +148,27 @@ def test_two_steps_end_to_end(monkeypatch, tmp_path, capsys):
     assert "seq_logratio=" in anomaly_text
     assert "truncated=False" in anomaly_text
     assert "tokens=" in anomaly_text
+    # Run header written lazily at FIRST firing: first line, exactly once
+    # despite two firings.
+    assert anomaly_text.startswith("=== run start (test-run) ===\n")
+    assert anomaly_text.count("=== run start") == 1
+
+    # Straggler length metrics, from per-sequence completion token counts.
+    for m in history:
+        assert m["train/completion_len_max"] >= m["train/completion_len_median"]
+        assert m["train/completion_len_median"] >= 1
+        assert m["train/completion_len_mean"] > 0
+        assert m["train/straggler_ratio"] == (
+            m["train/completion_len_max"] / m["train/completion_len_median"]
+        )
+    for logged in recorder.logged:
+        for key in (
+            "train/completion_len_max",
+            "train/completion_len_median",
+            "train/completion_len_mean",
+            "train/straggler_ratio",
+        ):
+            assert key in logged
 
     # Per-step stdout line, built from the metrics dict.
     out = capsys.readouterr().out

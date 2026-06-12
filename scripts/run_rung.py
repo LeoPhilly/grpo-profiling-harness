@@ -99,14 +99,16 @@ def main():
     dump_path = dumps_dir / f"{args.run_name}.txt"
     anomaly_path = dumps_dir / f"{args.run_name}-anomalies.txt"
     # Appended blocks from retries of the same run name must be
-    # distinguishable when reading the artifacts later.
+    # distinguishable when reading the artifacts later. The periodic dump
+    # always gets content (step 0), so its header is written up front; the
+    # anomaly file is created lazily at first firing (header passed via
+    # config) so clean runs leave no header-only file.
     start_header = (
         f"=== run start ({args.run_name}, "
         f"{datetime.now().isoformat(timespec='seconds')}) ===\n"
     )
-    for path in (dump_path, anomaly_path):
-        with open(path, "a") as f:
-            f.write(start_header)
+    with open(dump_path, "a") as f:
+        f.write(start_header)
 
     cfg = TrainConfig(
         model_name=args.model,
@@ -117,6 +119,7 @@ def main():
         gpu_memory_utilization=args.gpu_mem_util,
         micro_batch_size=args.micro_batch_size,
         anomaly_dump_path=str(anomaly_path),
+        anomaly_dump_header=start_header,
         wandb_mode="online",
     )
 
