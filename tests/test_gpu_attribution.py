@@ -54,11 +54,12 @@ def calibration():
     probe_ms = _time_sleep_standalone(n_probe)
     cycles_per_ms = n_probe / probe_ms
 
-    # Physics anchor: clock_rate() is the SM clock in kHz, i.e. cycles/ms —
-    # same order of magnitude as the fit, or something is unit-botched.
-    # If this fails with ratio ~1e+/-3, the kHz assumption is what's wrong:
-    # fix the unit from the observed value, don't widen the band.
-    nominal_cycles_per_ms = torch.cuda.clock_rate()
+    # Physics anchor: clock_rate() returns the SM clock in MHz — observed on
+    # the A100 (2026-06-12): empirical fit 1,047,589 cycles/ms (~1.05 GHz),
+    # clock_rate() = 1095, ratio 0.957 after the *1000 conversion. The
+    # original kHz assumption tripped this assert at ratio ~957, exactly the
+    # ~1e3 unit-botch failure mode it exists to catch.
+    nominal_cycles_per_ms = torch.cuda.clock_rate() * 1000  # MHz -> cycles/ms
     ratio = cycles_per_ms / nominal_cycles_per_ms
     assert 0.1 < ratio < 10, (
         f"calibration {cycles_per_ms:.0f} cyc/ms vs nominal "
