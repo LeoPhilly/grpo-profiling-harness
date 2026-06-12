@@ -1,0 +1,32 @@
+metric,mean,std,p10,p90,share_of_wall_pct
+time/advantages,0.000331,0.000143,0.000176,0.000454,0.003
+time/backward,1.116587,0.11287,0.927363,1.218327,11.605
+time/build_batch,0.005721,0.000605,0.004856,0.006363,0.059
+time/forward,0.487464,0.052998,0.389522,0.539876,5.066
+time/generate,7.893519,0.923142,5.963585,8.480594,82.038
+time/identity_check,0.00021,2.8e-05,0.000184,0.000229,0.002
+time/loss_compute,0.041803,0.004345,0.035114,0.047245,0.434
+time/optimizer,0.058869,0.035627,0.053601,0.054071,0.612
+time/render,0.002384,0.000173,0.002189,0.00268,0.025
+time/reward,0.000221,7.3e-05,0.000182,0.000246,0.002
+time/sync_weights,0.012367,0.001203,0.011707,0.012972,0.129
+forward_loss (=forward+loss_compute+backward),1.645853,0.169108,1.356228,1.803391,17.106
+time/wall_clock,9.621753,1.09092,7.3969,10.341626,
+var_share/time/advantages,0.0,,,,
+var_share/time/backward,1.07,,,,
+var_share/time/build_batch,0.0,,,,
+var_share/time/forward,0.236,,,,
+var_share/time/generate,71.606,,,,
+var_share/time/identity_check,0.0,,,,
+var_share/time/loss_compute,0.002,,,,
+var_share/time/optimizer,0.107,,,,
+var_share/time/render,0.0,,,,
+var_share/time/reward,0.0,,,,
+var_share/time/sync_weights,0.0,,,,
+var_share/covariance remainder,26.979,,,,
+time/tokens_per_sec_generate,1144.586074,,,,
+train/reward_mean,0.69,,,,
+train/format_rate,0.939375,,,,
+n_steps,50,,,,
+window,"[50,100)",,,,
+mean_abs_timing_residual,0.00024,,,,
