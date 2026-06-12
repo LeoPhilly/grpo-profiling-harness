@@ -28,9 +28,11 @@ TIMED_PHASES = (
     "sync_weights",
     "generate",
     "reward",
+    "advantages",
     "build_batch",
     "forward",
     "loss_compute",
+    "identity_check",
     "backward",
     "optimizer",
 )
@@ -126,12 +128,9 @@ def test_two_steps_end_to_end(monkeypatch, tmp_path, capsys):
         assert logged[TOKENS_PER_SEC_GENERATE_KEY] > 0
         assert math.isfinite(logged[TIMING_RESIDUAL_KEY])
         assert abs(logged[TIMING_RESIDUAL_KEY]) < 0.05
-        # Continuity: time/forward_loss is the exact sum of its sub-phases.
-        assert logged[phase_wandb_key("forward_loss")] == (
-            logged[phase_wandb_key("forward")]
-            + logged[phase_wandb_key("loss_compute")]
-            + logged[phase_wandb_key("backward")]
-        )
+        # The r0-era aggregate is no longer logged: the flat decomposition
+        # is exactly the eleven phases; analysis derives forward_loss.
+        assert phase_wandb_key("forward_loss") not in logged
 
     # New identity stats: token-weighted mean bracketed by the per-sequence
     # extremes; FakeGenerator never truncates, so truncated_frac is exactly 0.

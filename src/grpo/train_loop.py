@@ -30,7 +30,6 @@ from grpo.instrumentation.timing import (
     TOKENS_PER_SEC_GENERATE_KEY,
     WALL_CLOCK,
     PhaseTimer,
-    phase_wandb_key,
     to_wandb_metrics,
 )
 from grpo.loss import grpo_loss_from_token_logprobs, shifted_token_logprobs
@@ -174,11 +173,13 @@ def forward_loss_phase(model, batch, advantages, micro_batch_size, timer):
     since 1.5B OOMed on activations. Only the detached (b, T-1) gathered
     logprobs are kept, concatenated for the identity check.
 
-    Timing: this function owns three timer sub-phases, accumulated across
-    chunks — "forward" (model to logits), "loss_compute" (gather + loss +
-    identity), "backward". It is NOT wrapped in an outer phase: nesting
-    would double-count time in the residual. time/forward_loss is logged
-    by the caller as the sum of the three, for continuity with r0.
+    Timing: this function owns four timer phases — "forward" (model to
+    logits), "loss_compute" (gather + loss + weighting), "backward" (both
+    accumulated across chunks), and "identity_check" (once, on the
+    concatenated logprobs). It is NOT wrapped in an outer phase: nesting
+    would double-count time in the residual. No forward_loss aggregate is
+    logged; analysis derives it (=forward+loss_compute+backward) for
+    comparability with r0.
 
     Returns (detached aggregate loss, identity stats).
     """
@@ -214,7 +215,7 @@ def forward_loss_phase(model, batch, advantages, micro_batch_size, timer):
                 weighted.backward()  # accumulates grads; frees chunk's graph
                 aggregate_loss += weighted.detach()
 
-    with timer.phase("loss_compute"):
+    with timer.phase("identity_check"):
         identity_stats = logprob_identity(torch.cat(chunk_logprobs, dim=0), batch)
     return aggregate_loss, identity_stats
 
@@ -321,6 +322,7 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
             )
         with timer.phase("reward"):
             rewards, format_rate = reward_phase(outs, ground_truths, cfg.group_size)
+        with timer.phase("advantages"):
             advantages = compute_group_advantages(rewards, cfg.group_size).to(
                 device
             )
@@ -368,11 +370,6 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
             # number that has to accompany any utilization claim.
             TOKENS_PER_SEC_GENERATE_KEY: completion_tokens / summary["generate"],
             **to_wandb_metrics(summary),
-            # Derived sum, not a timer phase: continuity with the r0 gate
-            # run's time/forward_loss panel.
-            phase_wandb_key("forward_loss"): (
-                summary["forward"] + summary["loss_compute"] + summary["backward"]
-            ),
         }
         if device.type == "cuda":
             metrics[MEM_PEAK_KEY] = (

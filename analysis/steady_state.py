@@ -17,6 +17,14 @@ WALL = "time/wall_clock"
 TPS = "time/tokens_per_sec_generate"
 RESIDUAL = "check/timing_residual_frac"
 SCALARS = (TPS, "train/reward_mean", "train/format_rate")
+# Runs after the flat phase decomposition log forward/loss_compute/backward
+# separately; this derived row keeps them comparable with r0's logged
+# time/forward_loss. NOTE: r0's aggregate also contained the identity
+# computation (now its own identity_check phase), so the comparison is
+# ~ms generous to new runs.
+FORWARD_LOSS = "time/forward_loss"
+FORWARD_LOSS_PARTS = ("time/forward", "time/loss_compute", "time/backward")
+FORWARD_LOSS_DERIVED = "forward_loss (=forward+loss_compute+backward)"
 
 
 def percentile(sorted_vals, q):
@@ -47,11 +55,24 @@ def aggregate_window(rows, start_step, end_step):
             if isinstance(val, (int, float)):
                 series.setdefault(key, []).append(val)
 
+    # Derived per-step series (not sum-of-aggregates: std and percentiles of
+    # a sum are not the sum of stds/percentiles). Only when the run doesn't
+    # already log the r0-era aggregate.
+    if FORWARD_LOSS not in series and all(
+        p in series for p in FORWARD_LOSS_PARTS
+    ):
+        parts = [series[p] for p in FORWARD_LOSS_PARTS]
+        if len({len(p) for p in parts}) == 1:
+            series[FORWARD_LOSS_DERIVED] = [sum(vals) for vals in zip(*parts)]
+
     wall_mean = statistics.fmean(series[WALL]) if WALL in series else None
     time_keys = sorted(k for k in series if k.startswith(TIME_PREFIX) and k != TPS)
     time_keys.sort(key=lambda k: k == WALL)  # wall_clock printed last
+    table_keys = list(time_keys)
+    if FORWARD_LOSS_DERIVED in series:
+        table_keys.insert(max(len(table_keys) - 1, 0), FORWARD_LOSS_DERIVED)
     table = []
-    for key in time_keys:
+    for key in table_keys:
         vals = sorted(series[key])
         share = None
         if key != WALL and wall_mean:
@@ -109,13 +130,13 @@ def main():
         f"-> {n} steps of {args.run}"
     )
     print(
-        f"{'metric':<34} {'mean_s':>9} {'std_s':>9} "
+        f"{'metric':<46} {'mean_s':>9} {'std_s':>9} "
         f"{'p10_s':>9} {'p90_s':>9} {'% of wall':>10}"
     )
     for key, mean, std, p10, p90, share in table:
         share_str = f"{share:.1f}" if share is not None else "-"
         print(
-            f"{key:<34} {mean:>9.3f} {std:>9.3f} "
+            f"{key:<46} {mean:>9.3f} {std:>9.3f} "
             f"{p10:>9.3f} {p90:>9.3f} {share_str:>10}"
         )
 

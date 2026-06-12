@@ -2,6 +2,7 @@
 The wandb API shell can only be validated live against a real run."""
 
 import importlib.util
+import statistics
 from pathlib import Path
 
 import pytest
@@ -91,6 +92,44 @@ def test_variance_decomposition_covariance_remainder():
     assert decomp["time/other"] == pytest.approx(25.0)
     assert decomp["covariance remainder"] == pytest.approx(50.0)
     assert sum(pct for _, pct in var_decomp) == pytest.approx(100.0)
+
+
+def test_derived_forward_loss_row():
+    # New-style rows: parts logged, no aggregate -> derived per-step series.
+    rows = [
+        {
+            "_step": i,
+            "time/forward": f,
+            "time/loss_compute": 0.1,
+            "time/backward": b,
+            "time/wall_clock": f + 0.1 + b + 1.0,
+        }
+        for i, (f, b) in enumerate([(0.5, 1.0), (0.7, 1.4)])
+    ]
+    table, *_, var_decomp = steady_state.aggregate_window(rows, 0, 2)
+    by_key = {row[0]: row[1:] for row in table}
+    label = steady_state.FORWARD_LOSS_DERIVED
+    mean, std, p10, p90, share = by_key[label]
+    # Per-step sums: 1.6 and 2.2 -> mean 1.9; std/percentiles from the
+    # summed series, NOT sums of per-part stds/percentiles.
+    assert mean == pytest.approx(1.9)
+    assert std == pytest.approx(statistics.stdev([1.6, 2.2]))
+    # Floor-index percentile convention (see test_percentiles): with n=2,
+    # both p10 and p90 land on index int(q*1) = 0.
+    assert (p10, p90) == (1.6, 1.6)
+    assert share == pytest.approx(100.0 * 1.9 / statistics.fmean([2.6, 3.2]))
+    # Ordered before wall_clock; excluded from the variance decomposition.
+    assert table[-1][0] == "time/wall_clock"
+    assert table[-2][0] == label
+    assert label not in dict(var_decomp)
+
+
+def test_no_derived_row_when_aggregate_logged():
+    # r0-style rows already log time/forward_loss: no derived duplicate.
+    table, *_ = steady_state.aggregate_window(_rows(20), 0, 20)
+    keys = [row[0] for row in table]
+    assert steady_state.FORWARD_LOSS in keys
+    assert steady_state.FORWARD_LOSS_DERIVED not in keys
 
 
 def test_percentiles():
