@@ -116,23 +116,24 @@ def test_injection_charged_to_site(calibration, site):
     assert abs(injected[RESIDUAL_FRAC]) < 0.05
 
 
-def test_cpu_phase_drain_semantics(calibration):
-    """SEMANTIC UNDER TEST (the documented behavior the substrate notes
-    rely on): async GPU work issued during a perf_counter-timed CPU phase
-    is NOT charged to that phase — the host clock only measures host time —
-    it drains into the NEXT event-timed phase's window.
+def test_cpu_phase_work_lands_in_residual(calibration):
+    """CONFIRMED SEMANTIC (A100, 2026-06-12): async GPU work issued during
+    a perf_counter-timed CPU phase is charged to NOBODY — not the CPU phase
+    (host clock only measures host time), not the next event-timed phase
+    (its start event timestamps at GPU execution, after the in-flight work
+    completes). It lands in the unattributed gap: the step RESIDUAL.
+
+    The step residual check is therefore the safety net that catches
+    CPU-issued GPU work — which is why a production residual of ~4e-5
+    certifies that no such leakage is happening in the real loop.
+
+    History: the original spec predicted drain-into-next-phase; the
+    pre-registered alternative diagnosis was confirmed by measurement
+    (next-phase delta -0.0000s, wall grew 0.1467s ~= W=0.1493s).
 
     PhaseTimer is single-backend, so the mixed step is hand-rolled here:
     event pairs for the flanking GPU phases, perf_counter for the middle
-    CPU phase — exactly the mixed accounting the semantic describes.
-
-    PRE-REGISTERED DIAGNOSIS if the drain assertion fails on the box:
-    CUDA events timestamp at GPU *execution*, so the in-flight W may
-    complete before the next phase's start event ticks — landing in the
-    gap BETWEEN phases (i.e. the step residual), not in p_next's window.
-    If p_next ~= baseline and the wall-vs-phases gap is ~W, that is what
-    happened: correct the documented semantic to 'charged to the
-    residual', and update the substrate notes and validation.md."""
+    CPU phase — exactly the mixed accounting the semantic describes."""
     work = int(calibration["cycles_per_ms"] * 10)
     w_s = calibration["w_ms"] / 1000.0
 
@@ -169,12 +170,16 @@ def test_cpu_phase_drain_semantics(calibration):
     assert inj["cpu"] < 3 * base["cpu"], (base["cpu"], inj["cpu"])
     # Upstream phase untouched.
     assert inj["gpu_a"] < 3 * base["gpu_a"], (base["gpu_a"], inj["gpu_a"])
-    # The documented drain semantic: W lands in the next GPU phase's window.
-    drained = inj["gpu_b"] - base["gpu_b"]
-    assert abs(drained - w_s) < 0.2 * w_s, (
-        f"drain: next-phase delta {drained:.4f}s vs W={w_s:.4f}s; "
-        f"walls base/inj {base['wall']:.4f}/{inj['wall']:.4f}s — if delta~0 "
-        f"and wall grew ~W, see PRE-REGISTERED DIAGNOSIS in the docstring"
+    # Next phase is NOT charged: its start event ticks after W completes.
+    next_delta = inj["gpu_b"] - base["gpu_b"]
+    assert abs(next_delta) < 0.1 * w_s, (
+        f"next-phase delta {next_delta:.4f}s should be ~0 (W={w_s:.4f}s)"
+    )
+    # The work lands in the unattributed gap: wall grows by ~W while no
+    # phase claims it — exactly what the residual check exists to catch.
+    wall_growth = inj["wall"] - base["wall"]
+    assert abs(wall_growth - w_s) < 0.2 * w_s, (
+        f"wall grew {wall_growth:.4f}s, expected ~W={w_s:.4f}s"
     )
 
 
