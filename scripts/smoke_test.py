@@ -93,6 +93,19 @@ def main():
     # The one device decision point.
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    if device == "cuda":
+        # Timer-attribution validation gates everything else: if attribution
+        # is broken, no number from the run below is trustworthy.
+        import subprocess
+
+        repo_root = Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-m", "gpu", "-q",
+             str(repo_root / "tests" / "test_gpu_attribution.py")],
+            cwd=repo_root,
+        )
+        assert result.returncode == 0, "GPU attribution tests failed — see above"
+
     if args.generator == "fake":
         model_name = args.model or "sshleifer/tiny-gpt2"
     else:
