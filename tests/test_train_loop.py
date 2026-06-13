@@ -93,6 +93,7 @@ def test_two_steps_end_to_end(monkeypatch, tmp_path, capsys):
         # anomaly tripwire.
         anomaly_dump_path=str(anomaly_path),
         anomaly_dump_header="=== run start (test-run) ===\n",
+        checkpoint_save_path=str(tmp_path / "ckpt"),
     )
     tokenizer = AutoTokenizer.from_pretrained(TINY_MODEL)
     generator = _SpyFakeGenerator(tokenizer, completion_tokens=(6, 12), seed=0)
@@ -174,6 +175,12 @@ def test_two_steps_end_to_end(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "step 1/2 | reward 0.50 | format 1.00 | gen " in out
     assert "| identity -9." in out
+
+    # End-of-run checkpoint save (for identity_autopsy --checkpoint): the
+    # directory materializes with config + weights.
+    ckpt = tmp_path / "ckpt"
+    assert (ckpt / "config.json").exists()
+    assert any(p.suffix in (".safetensors", ".bin") for p in ckpt.iterdir())
 
     # Single-tokenization invariant: the generator received exactly the
     # token ids render_prompt produces — never prompt text.

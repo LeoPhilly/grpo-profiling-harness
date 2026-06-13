@@ -90,6 +90,12 @@ def main():
         "steady state with Adam moments resident)",
     )
     parser.add_argument("--run-name", required=True)
+    parser.add_argument(
+        "--save-checkpoint",
+        action="store_true",
+        help="save_pretrained to results/checkpoints/<run-name>/ at the end "
+        "of the run (for identity_autopsy --checkpoint)",
+    )
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -120,6 +126,12 @@ def main():
         micro_batch_size=args.micro_batch_size,
         anomaly_dump_path=str(anomaly_path),
         anomaly_dump_header=start_header,
+        checkpoint_save_path=(
+            str(Path(__file__).resolve().parent.parent / "results"
+                / "checkpoints" / args.run_name)
+            if args.save_checkpoint
+            else ""
+        ),
         wandb_mode="online",
     )
 

@@ -72,6 +72,9 @@ class TrainConfig:
     anomaly_threshold: float = 0.5
     anomaly_dump_path: str = ""
     anomaly_dump_header: str = ""
+    # When set, save_pretrained() here at the end of the run (for the
+    # identity-autopsy --checkpoint probe). Empty = off.
+    checkpoint_save_path: str = ""
     wandb_project: str = "grpo-profiling"
     wandb_mode: str = "offline"
 
@@ -432,5 +435,7 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
         history.append(metrics)
         step += 1
 
+    if cfg.checkpoint_save_path:
+        model.save_pretrained(cfg.checkpoint_save_path)
     run.finish()
     return history

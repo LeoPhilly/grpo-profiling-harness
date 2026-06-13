@@ -37,20 +37,29 @@ from grpo.train_loop import build_batch_phase  # noqa: E402
 N_PROMPTS = 16
 MICRO_BATCH = 4
 MAX_NEW_TOKEN_CONFIGS = (128, 512)  # 128 forces truncations; 512 is normal
-BUCKETS = ("first", "middle", "last3", "final")
+# Absolute-position bins probe depth accumulation (KV-cache numerics
+# compounding => monotonic |lr| growth with position); final and last-3
+# stay as separate priority rows so the boundary cells remain visible.
+POSITION_BINS = ((0, 64), (64, 128), (128, 256), (256, 512))
+BUCKETS = tuple(f"{lo}-{hi}" for lo, hi in POSITION_BINS) + (
+    "512+",  # unreachable at max_new_tokens<=512; safety fallback
+    "last3",
+    "final",
+)
 
 
 def position_bucket(i, length):
-    """Disjoint relative-position buckets over a completion of `length`
-    tokens: final token, first token, the 3 before final, everything else.
-    Priority final > first > last3 so short completions stay disjoint."""
+    """Disjoint buckets over a completion of `length` tokens: final token
+    and the 3 before it take priority (boundary cells stay visible), then
+    absolute-position bins [0-64, 64-128, 128-256, 256-512)."""
     if i == length - 1:
         return "final"
-    if i == 0:
-        return "first"
     if i >= length - 4:
         return "last3"
-    return "middle"
+    for lo, hi in POSITION_BINS:
+        if lo <= i < hi:
+            return f"{lo}-{hi}"
+    return "512+"
 
 
 def rescore(model, batch):
@@ -74,6 +83,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
     parser.add_argument("--gpu-mem-util", type=float, default=0.3)
+    parser.add_argument(
+        "--checkpoint",
+        default=None,
+        help="local checkpoint dir (run_rung --save-checkpoint output) to "
+        "load trainer weights from instead of --model; sync_weights pushes "
+        "the same weights into the engine, as in the real loop. Probes "
+        "whether policy sharpening produces the production-signed drift. "
+        "Tokenizer/engine config still come from --model.",
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -83,9 +101,13 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    # bf16, exactly as the real loop loads the trainer.
+    # bf16, exactly as the real loop loads the trainer. --checkpoint swaps
+    # only the weight source; everything downstream (sync, render, rescore)
+    # is identical.
+    weights_source = args.checkpoint or args.model
+    print(f"trainer weights from: {weights_source}")
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype=torch.bfloat16
+        weights_source, torch_dtype=torch.bfloat16
     ).to(device)
     model.eval()
 
@@ -125,8 +147,13 @@ def main():
     for max_new in MAX_NEW_TOKEN_CONFIGS:
         recomputed["fp32"][max_new] = rescore(model, batches[max_new])
 
-    out_dir = Path(__file__).resolve().parent.parent / "results" / "identity_autopsy"
+    # v2 outputs go in their own directory — never into the v1 root, so old
+    # and new evidence can't be confused mid-diagnosis.
+    out_dir = (
+        Path(__file__).resolve().parent.parent / "results" / "identity_autopsy" / "v2"
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
+    print("autopsy v2 (signed, absolute-position bins)")
 
     for max_new in MAX_NEW_TOKEN_CONFIGS:
         batch, outs = batches[max_new], gens[max_new]
@@ -139,7 +166,9 @@ def main():
         }
 
         csv_rows = []
-        # (bucket, truncated, dtype) -> list of |log-ratio|
+        # (bucket, truncated, dtype) -> list of SIGNED log-ratios; signed
+        # mean is the discriminator (a symmetric noise cloud means ~0; the
+        # production symptom is a consistent ~-0.08), |.| stats derived.
         agg = {}
         for b, out in enumerate(outs):
             positions = torch.nonzero(mask[b]).flatten().tolist()
@@ -155,43 +184,47 @@ def main():
                 )
                 for dt in ("bf16", "fp32"):
                     agg.setdefault((bucket, out["truncated"], dt), []).append(
-                        abs(lr[dt])
+                        lr[dt]
                     )
 
         csv_path = out_dir / f"max{max_new}.csv"
         with open(csv_path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(
-                ["seq_id", "position", "rel_position_bucket", "token_id",
+                ["seq_id", "position", "position_bucket", "token_id",
                  "logratio_bf16", "logratio_fp32", "truncated", "completion_len"]
             )
             writer.writerows(csv_rows)
         print(f"wrote {csv_path} ({len(csv_rows)} positions)")
 
         print(f"\n=== max_new_tokens={max_new} ===")
-        print(f"{'bucket':<8} {'truncated':<10} {'dtype':<6} "
-              f"{'mean|lr|':>10} {'max|lr|':>10} {'n':>6}")
+        print(f"{'bucket':<9} {'truncated':<10} {'dtype':<6} "
+              f"{'mean_lr':>10} {'mean|lr|':>10} {'max|lr|':>10} {'n':>6}")
         for bucket in BUCKETS:
             for truncated in (True, False):
                 for dtype in ("bf16", "fp32"):
                     vals = agg.get((bucket, truncated, dtype))
                     if not vals:
                         continue
+                    abs_vals = [abs(v) for v in vals]
                     print(
-                        f"{bucket:<8} {str(truncated):<10} {dtype:<6} "
-                        f"{sum(vals) / len(vals):>10.5f} {max(vals):>10.5f} "
-                        f"{len(vals):>6}"
+                        f"{bucket:<9} {str(truncated):<10} {dtype:<6} "
+                        f"{sum(vals) / len(vals):>10.5f} "
+                        f"{sum(abs_vals) / len(abs_vals):>10.5f} "
+                        f"{max(abs_vals):>10.5f} {len(vals):>6}"
                     )
         print()
 
     print(
         "Signatures (human reads the tables above; no auto-verdict):\n"
-        "(A)  bookkeeping bug: ~0 everywhere EXCEPT localized positions —\n"
-        "     especially final position(s) of TRUNCATED sequences.\n"
-        "(B)  engine-vs-HF kernels: small uniform offset across ALL\n"
-        "     positions, truncated and non-truncated alike.\n"
-        "(B1) dtype/accumulation: the fp32 columns close the gap that the\n"
-        "     bf16 columns show."
+        "(A)      bookkeeping bug: ~0 everywhere EXCEPT localized boundary\n"
+        "         rows — especially final/last3 of TRUNCATED sequences.\n"
+        "(B-bias) systematic kernel bias: signed mean_lr consistently ONE\n"
+        "         SIGN in bf16 across buckets, truncated or not.\n"
+        "(B1)     dtype/accumulation: the fp32 columns close the gap that\n"
+        "         the bf16 columns show.\n"
+        "(depth)  KV-cache numerics compounding: |lr| grows monotonically\n"
+        "         across the position bins 0-64 -> 256-512."
     )
 
 
