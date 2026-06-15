@@ -8,6 +8,7 @@ residual| in the window prints a loud caveat.
 
 import argparse
 import csv
+import re
 import statistics
 import sys
 from pathlib import Path
@@ -32,6 +33,94 @@ def percentile(sorted_vals, q):
     return sorted_vals[int(q * (len(sorted_vals) - 1))]
 
 
+def _window(rows, start_step, end_step):
+    """Rows whose _step is in [start_step, end_step)."""
+    return [
+        r
+        for r in rows
+        if isinstance(r.get("_step"), (int, float))
+        and start_step <= r["_step"] < end_step
+    ]
+
+
+def _last_n(rows, n):
+    """The n highest-_step rows (the run's tail) — NOT the last n of any
+    window. Lets end-of-run drift show against the steady baseline."""
+    valid = sorted(
+        (r for r in rows if isinstance(r.get("_step"), (int, float))),
+        key=lambda r: r["_step"],
+    )
+    return valid[-n:]
+
+
+def _collect_series(window):
+    """{key: [numeric values...]} over a list of history rows; non-numeric
+    values (e.g. string notes) are skipped, so older runs missing a key
+    simply produce no series for it."""
+    series = {}
+    for row in window:
+        for key, val in row.items():
+            if isinstance(val, (int, float)):
+                series.setdefault(key, []).append(val)
+    return series
+
+
+def _bundle(vals):
+    """Full stat bundle for a numeric series, or None if absent/empty (->
+    'n/a' downstream, never a crash)."""
+    if not vals:
+        return None
+    s = sorted(vals)
+    return {
+        "mean": statistics.fmean(s),
+        "std": statistics.stdev(s) if len(s) > 1 else 0.0,
+        "min": s[0],
+        "max": s[-1],
+        "p10": percentile(s, 0.1),
+        "p90": percentile(s, 0.9),
+        "n": len(s),
+    }
+
+
+def _fmt(v):
+    """Magnitude-aware formatting: tiny values (identity, residual) keep 6
+    decimals; mid values 4; large (token counts) 1. None -> 'n/a'."""
+    if v is None:
+        return "n/a"
+    a = abs(v)
+    if a != 0 and a < 0.01:
+        return f"{v:.6f}"
+    if a < 100:
+        return f"{v:.4f}"
+    return f"{v:.1f}"
+
+
+# Section specs: (label, key, window, stats_to_surface). window is "steady"
+# or "last_20". Residual and the section-4 deltas are built specially below.
+SECTION2_SPECS = [
+    ("straggler/p99_p50_ratio", "straggler/p99_p50_ratio", "steady",
+     ("mean", "std", "p90", "max")),
+    ("straggler/completion_len_max", "straggler/completion_len_max", "steady",
+     ("mean", "max")),
+    ("straggler/completion_len_median", "straggler/completion_len_median",
+     "steady", ("mean", "std")),
+    ("train/truncated_frac", "train/truncated_frac", "steady", ("mean",)),
+    ("train/completion_tokens", "train/completion_tokens", "steady", ("mean",)),
+]
+SECTION3_IDENTITY_SPECS = [
+    ("check/logprob_identity [steady]", "check/logprob_identity", "steady",
+     ("mean",)),
+    ("check/logprob_identity [last_20]", "check/logprob_identity", "last_20",
+     ("mean",)),
+    ("check/logprob_identity_min", "check/logprob_identity_min", "steady",
+     ("min",)),
+    ("check/logprob_identity_max", "check/logprob_identity_max", "steady",
+     ("max",)),
+]
+STAT_COLS = ("mean", "std", "min", "max", "p10", "p90")
+GPU_METRICS = (("GPU Utilization", "gpu"), ("GPU Time Accessing Memory", "memory"))
+
+
 def aggregate_window(rows, start_step, end_step):
     """Pure aggregation over history rows (dicts with _step). Returns
     (table, scalars, n_steps, time_span, mean_abs_residual, var_decomp).
@@ -43,17 +132,8 @@ def aggregate_window(rows, start_step, end_step):
     pct) so the section sums to 100 — phase variances alone miss the
     cross-covariance (correlated phases) and untimed-gap contributions.
     None when var(wall) is ~0."""
-    window = [
-        r
-        for r in rows
-        if isinstance(r.get("_step"), (int, float))
-        and start_step <= r["_step"] < end_step
-    ]
-    series = {}
-    for row in window:
-        for key, val in row.items():
-            if isinstance(val, (int, float)):
-                series.setdefault(key, []).append(val)
+    window = _window(rows, start_step, end_step)
+    series = _collect_series(window)
 
     # Derived per-step series (not sum-of-aggregates: std and percentiles of
     # a sum are not the sum of stds/percentiles). Only when the run doesn't
@@ -107,6 +187,111 @@ def aggregate_window(rows, start_step, end_step):
     return table, scalars, len(window), span, mean_abs_residual, var_decomp
 
 
+def build_report(rows, start_step, end_step, last_n=20):
+    """Pure builder for Sections 2-4. Returns (sections, meta).
+
+    sections: ordered list of (title, [entry...]); entry is
+    (label, window, stats, bundle) where bundle is a _bundle dict (full
+    stats) or None ('n/a'). meta carries window sizes, the residual max-|.|
+    for the harness caveat, and the steady/tail identity means.
+
+    Reads ALL namespaces from history (no time/* filter); absent keys (older
+    runs predating straggler/) yield None bundles, never crashes."""
+    steady_rows = _window(rows, start_step, end_step)
+    tail_rows = _last_n(rows, last_n)
+    steady = _collect_series(steady_rows)
+    tail = _collect_series(tail_rows)
+    by_window = {"steady": steady, "last_20": tail}
+
+    def entry(label, key, window, stats):
+        return (label, window, stats, _bundle(by_window[window].get(key)))
+
+    section2 = [entry(*spec) for spec in SECTION2_SPECS]
+
+    # Section 3: residual reported as mean(signed) + max(|.|) so a large
+    # NEGATIVE residual (phases exceeding wall = double-count) still trips
+    # the caveat — a signed max() would miss it.
+    resid = steady.get("check/timing_residual_frac")
+    if resid:
+        resid_bundle = {
+            "mean": statistics.fmean(resid),
+            "max": max(abs(v) for v in resid),
+        }
+    else:
+        resid_bundle = None
+    section3 = [
+        ("check/timing_residual_frac (max=|.|)", "steady", ("mean", "max"),
+         resid_bundle)
+    ]
+    section3 += [entry(*spec) for spec in SECTION3_IDENTITY_SPECS]
+
+    # Section 4: reward/format get steady mean, last_20 mean, and the delta
+    # (start-vs-end); loss is steady-only context.
+    section4 = []
+    for key in ("train/reward_mean", "train/format_rate"):
+        b_steady = _bundle(steady.get(key))
+        b_tail = _bundle(tail.get(key))
+        section4.append((f"{key} [steady]", "steady", ("mean",), b_steady))
+        section4.append((f"{key} [last_20]", "last_20", ("mean",), b_tail))
+        delta = (
+            None
+            if b_steady is None or b_tail is None
+            else {"mean": b_tail["mean"] - b_steady["mean"]}
+        )
+        section4.append(
+            (f"{key} Δ(last_20 - steady)", "last_20-steady", ("mean",), delta)
+        )
+    section4.append(
+        ("train/loss [steady]", "steady", ("mean",), _bundle(steady.get("train/loss")))
+    )
+
+    meta = {
+        "n_steady": len(steady_rows),
+        "n_tail": len(tail_rows),
+        "residual_max_abs": resid_bundle["max"] if resid_bundle else None,
+    }
+    sections = [
+        ("Section 2 — Do stragglers get worse? (steady_window)", section2),
+        ("Section 3 — Are the numbers trustworthy? (the harness)", section3),
+        ("Section 4 — Did the run learn? (steady_window vs last_20)", section4),
+    ]
+    return sections, meta
+
+
+def gpu_metric(events, span, suffix):
+    """Pool system-stream samples whose key matches system.gpu.<i>.<suffix>
+    (e.g. 'gpu' = utilization, 'memory' = time accessing memory), restricted
+    to the window's wall-time span. memoryAllocated etc. are excluded by the
+    end-anchored match. Returns (bundle_or_None, sorted matched keys)."""
+    pat = re.compile(rf"system\.gpu\.\d+\.{re.escape(suffix)}$")
+    matched, vals = set(), []
+    for e in events:
+        ts = e.get("_timestamp", 0)
+        if span is not None and not (span[0] <= ts <= span[1]):
+            continue
+        for key, val in e.items():
+            if isinstance(val, (int, float)) and pat.match(key):
+                matched.add(key)
+                vals.append(val)
+    return _bundle(vals), sorted(matched)
+
+
+def print_section(title, entries):
+    """Render a Section 2-4 entry list: requested stats shown, '-' for
+    unrequested columns, 'n/a' across the row when the metric is absent."""
+    print(f"\n=== {title} ===")
+    print(f"{'metric':<40} " + " ".join(f"{c:>11}" for c in STAT_COLS))
+    for label, _window, stats, bundle in entries:
+        if bundle is None:
+            cells = " ".join(f"{'n/a':>11}" for _ in STAT_COLS)
+        else:
+            cells = " ".join(
+                f"{(_fmt(bundle[c]) if (c in stats and c in bundle) else '-'):>11}"
+                for c in STAT_COLS
+            )
+        print(f"{label:<40} {cells}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", required=True, help="entity/project/run_id")
@@ -124,11 +309,13 @@ def main():
     )
     if n == 0:
         sys.exit(f"no steps in [{args.start_step}, {args.end_step}) for {args.run}")
+    sections, meta = build_report(rows, args.start_step, args.end_step)
 
     print(
-        f"steady state: steps [{args.start_step}, {args.end_step}) "
-        f"-> {n} steps of {args.run}"
+        f"steady_window: steps [{args.start_step}, {args.end_step}) "
+        f"-> {n} steps of {args.run}  (last_20: {meta['n_tail']} tail steps)"
     )
+    print("\n=== Section 1 — Where does wall-clock time go? (steady_window) ===")
     print(
         f"{'metric':<46} {'mean_s':>9} {'std_s':>9} "
         f"{'p10_s':>9} {'p90_s':>9} {'% of wall':>10}"
@@ -160,27 +347,38 @@ def main():
             "trustworthy and must not be cited.\n"
         )
 
+    # Sections 2-4 (pure aggregation over all namespaces).
+    for title, entries in sections:
+        print_section(title, entries)
+    if meta["residual_max_abs"] is not None and meta["residual_max_abs"] >= 0.05:
+        print(
+            f"\n!!! CAVEAT: worst |timing residual| = {meta['residual_max_abs']:.4f} "
+            ">= 0.05 in steady_window. Section 1 phase numbers are NOT "
+            "trustworthy for this window (standing check #2).\n"
+        )
+
+    # Section 5 — system stream, narrative only.
+    print("\n=== Section 5 — How busy was the GPU? ===")
+    print(
+        "nvidia-smi system metrics (busy != useful, per CLAUDE.md) — "
+        "narrative context only"
+    )
+    gpu_bundles = {}
     try:
         events = run.history(stream="events", samples=4000, pandas=False)
-        key = "system.gpu.0.gpu"
-        vals = sorted(
-            e[key]
-            for e in events
-            if isinstance(e.get(key), (int, float))
-            and (span is None or span[0] <= e.get("_timestamp", 0) <= span[1])
-        )
-        if vals:
-            p10 = vals[int(0.1 * (len(vals) - 1))]
-            p90 = vals[int(0.9 * (len(vals) - 1))]
-            print(
-                "nvidia-smi utilization (busy != useful, per CLAUDE.md) — "
-                f"narrative context only: mean {statistics.fmean(vals):.1f}% "
-                f"p10 {p10:.1f}% p90 {p90:.1f}%"
-            )
-        else:
-            print("system-metrics stream: no GPU-util samples in window")
+        for label, suffix in GPU_METRICS:
+            bundle, matched = gpu_metric(events, span, suffix)
+            gpu_bundles[label] = bundle
+            if bundle:
+                print(
+                    f"  {label:<26} mean {_fmt(bundle['mean'])}  "
+                    f"p10 {_fmt(bundle['p10'])}  p90 {_fmt(bundle['p90'])}  "
+                    f"[keys: {', '.join(matched)}]"
+                )
+            else:
+                print(f"  {label:<26} n/a (no matching keys in window)")
     except Exception as exc:  # absent stream must not kill the analysis
-        print(f"system-metrics stream unavailable ({exc}) — GPU util skipped")
+        print(f"  system-metrics stream unavailable ({exc}) — Section 5 n/a")
 
     if args.csv:
         out_dir = Path(__file__).resolve().parent.parent / "results" / "steady_state"
@@ -188,26 +386,41 @@ def main():
         # Human-readable artifact name: wandb run name first, id for dedup.
         run_id = args.run.split("/")[-1]
         out_path = out_dir / f"{run.name or 'run'}-{run_id}.csv"
+        cols = ["mean", "std", "min", "max", "p10", "p90"]
+
+        def row(metric, window, bundle, share=""):
+            def g(s):
+                return "" if (bundle is None or s not in bundle) else round(bundle[s], 6)
+            return [metric, window] + [g(c) for c in cols] + [share]
+
+        steady_label = f"[{args.start_step},{args.end_step})"
         with open(out_path, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(
-                ["metric", "mean", "std", "p10", "p90", "share_of_wall_pct"]
-            )
+            writer.writerow(["metric", "window"] + cols + ["share_of_wall_pct"])
+            # Section 1 (phase table) — min/max blank, share filled.
             for key, mean, std, p10, p90, share in table:
+                b = {"mean": mean, "std": std, "p10": p10, "p90": p90}
                 writer.writerow(
-                    [key, round(mean, 6), round(std, 6), round(p10, 6),
-                     round(p90, 6), "" if share is None else round(share, 3)]
+                    row(key, steady_label, b, "" if share is None else round(share, 3))
                 )
             for key, pct in var_decomp or []:
-                writer.writerow([f"var_share/{key}", round(pct, 3), "", "", "", ""])
-            pad = ["", "", "", ""]
+                writer.writerow(row(f"var_share/{key}", steady_label, {"mean": pct}))
             for key, val in scalars.items():
-                writer.writerow([key, round(val, 6)] + pad)
-            writer.writerow(["n_steps", n] + pad)
-            writer.writerow(["window", f"[{args.start_step},{args.end_step})"] + pad)
+                writer.writerow(row(key, steady_label, {"mean": val}))
+            # Sections 2-4.
+            for _title, entries in sections:
+                for label, window, _stats, bundle in entries:
+                    writer.writerow(row(label, window, bundle))
+            # Section 5 (system stream).
+            for label, bundle in gpu_bundles.items():
+                writer.writerow(row(label, "events-stream", bundle))
+            # Meta.
+            writer.writerow(row("n_steady_steps", steady_label, {"mean": n}))
+            writer.writerow(row("n_last20_steps", "last_20", {"mean": meta["n_tail"]}))
             if mean_abs_residual is not None:
                 writer.writerow(
-                    ["mean_abs_timing_residual", round(mean_abs_residual, 6)] + pad
+                    row("mean_abs_timing_residual", steady_label,
+                        {"mean": mean_abs_residual})
                 )
         print(f"wrote {out_path}")
 

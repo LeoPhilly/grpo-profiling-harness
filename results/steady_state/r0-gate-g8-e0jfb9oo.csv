@@ -1,23 +1,42 @@
-metric,mean,std,p10,p90,share_of_wall_pct
-time/build_batch,0.005487,0.000496,0.004835,0.006126,0.059
-time/forward_loss,1.644735,0.166014,1.344795,1.786261,17.727
-time/generate,7.55962,0.870169,5.752666,8.095553,81.478
-time/optimizer,0.053711,0.00012,0.053578,0.053862,0.579
-time/render,0.002305,0.000129,0.00213,0.00247,0.025
-time/reward,0.00059,0.000135,0.000431,0.000819,0.006
-time/sync_weights,0.011307,0.000135,0.011119,0.01148,0.122
-time/wall_clock,9.27809,1.030822,7.135055,9.939224,
-var_share/time/build_batch,0.0,,,,
-var_share/time/forward_loss,2.594,,,,
-var_share/time/generate,71.259,,,,
-var_share/time/optimizer,0.0,,,,
-var_share/time/render,0.0,,,,
-var_share/time/reward,0.0,,,,
-var_share/time/sync_weights,0.0,,,,
-var_share/covariance remainder,26.147,,,,
-time/tokens_per_sec_generate,1194.704282,,,,
-train/reward_mean,0.69,,,,
-train/format_rate,0.939375,,,,
-n_steps,50,,,,
-window,"[50,100)",,,,
-mean_abs_timing_residual,3.7e-05,,,,
+metric,window,mean,std,min,max,p10,p90,share_of_wall_pct
+time/build_batch,"[50,100)",0.005487,0.000496,,,0.004835,0.006126,0.059
+time/forward_loss,"[50,100)",1.644735,0.166014,,,1.344795,1.786261,17.727
+time/generate,"[50,100)",7.55962,0.870169,,,5.752666,8.095553,81.478
+time/optimizer,"[50,100)",0.053711,0.00012,,,0.053578,0.053862,0.579
+time/render,"[50,100)",0.002305,0.000129,,,0.00213,0.00247,0.025
+time/reward,"[50,100)",0.00059,0.000135,,,0.000431,0.000819,0.006
+time/sync_weights,"[50,100)",0.011307,0.000135,,,0.011119,0.01148,0.122
+time/wall_clock,"[50,100)",9.27809,1.030822,,,7.135055,9.939224,
+var_share/time/build_batch,"[50,100)",2.3e-05,,,,,,
+var_share/time/forward_loss,"[50,100)",2.593725,,,,,,
+var_share/time/generate,"[50,100)",71.259042,,,,,,
+var_share/time/optimizer,"[50,100)",1e-06,,,,,,
+var_share/time/render,"[50,100)",2e-06,,,,,,
+var_share/time/reward,"[50,100)",2e-06,,,,,,
+var_share/time/sync_weights,"[50,100)",2e-06,,,,,,
+var_share/covariance remainder,"[50,100)",26.147204,,,,,,
+time/tokens_per_sec_generate,"[50,100)",1194.704282,,,,,,
+train/reward_mean,"[50,100)",0.69,,,,,,
+train/format_rate,"[50,100)",0.939375,,,,,,
+straggler/p99_p50_ratio,steady,,,,,,,
+straggler/completion_len_max,steady,,,,,,,
+straggler/completion_len_median,steady,,,,,,,
+train/truncated_frac,steady,,,,,,,
+train/completion_tokens,steady,9022.4,1256.304802,5633,12042,7029,10461,
+check/timing_residual_frac (max=|.|),steady,3.7e-05,,,6.3e-05,,,
+check/logprob_identity [steady],steady,-0.013585,0.019311,-0.086424,-0.000451,-0.047407,-0.001651,
+check/logprob_identity [last_20],last_20,-0.001061,0.001096,-0.002546,0.000622,-0.002464,0.00031,
+check/logprob_identity_min,steady,,,,,,,
+check/logprob_identity_max,steady,,,,,,,
+train/reward_mean [steady],steady,0.69,0.16809,0.15625,1,0.4375,0.875,
+train/reward_mean [last_20],last_20,0.857812,0.107527,0.625,1,0.6875,0.96875,
+train/reward_mean Δ(last_20 - steady),last_20-steady,0.167813,,,,,,
+train/format_rate [steady],steady,0.939375,0.067235,0.75,1,0.8125,1,
+train/format_rate [last_20],last_20,0.971875,0.0378,0.875,1,0.90625,1,
+train/format_rate Δ(last_20 - steady),last_20-steady,0.0325,,,,,,
+train/loss [steady],steady,-0.044371,0.053814,-0.254,0,-0.099536,-0.002121,
+GPU Utilization,events-stream,45.645161,19.890615,34,99,35,83,
+GPU Time Accessing Memory,events-stream,21.709677,9.165855,17,48,17,33,
+n_steady_steps,"[50,100)",50,,,,,,
+n_last20_steps,last_20,20,,,,,,
+mean_abs_timing_residual,"[50,100)",3.7e-05,,,,,,

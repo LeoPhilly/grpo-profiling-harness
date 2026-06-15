@@ -1,0 +1,51 @@
+metric,window,mean,std,min,max,p10,p90,share_of_wall_pct
+time/advantages,"[50,100)",0.00027,8.4e-05,,,0.000181,0.000364,0.003
+time/backward,"[50,100)",2.003599,0.344057,,,1.573082,2.38582,20.163
+time/build_batch,"[50,100)",0.019342,0.011585,,,0.008582,0.035217,0.195
+time/forward,"[50,100)",0.856457,0.152666,,,0.669269,1.034477,8.619
+time/generate,"[50,100)",6.904109,1.490848,,,5.026197,8.510643,69.48
+time/identity_check,"[50,100)",0.000193,1.1e-05,,,0.000182,0.000213,0.002
+time/loss_compute,"[50,100)",0.081343,0.010507,,,0.067681,0.093168,0.819
+time/optimizer,"[50,100)",0.05378,5.8e-05,,,0.053688,0.053862,0.541
+time/render,"[50,100)",0.002423,0.000143,,,0.00225,0.002633,0.024
+time/reward,"[50,100)",0.000318,7.2e-05,,,0.000266,0.000373,0.003
+time/sync_weights,"[50,100)",0.011923,0.000212,,,0.011708,0.012177,0.12
+forward_loss (=forward+loss_compute+backward),"[50,100)",2.941399,0.505908,,,2.308181,3.505724,29.601
+time/wall_clock,"[50,100)",9.936804,1.986697,,,7.411482,12.118736,
+var_share/time/advantages,"[50,100)",0.0,,,,,,
+var_share/time/backward,"[50,100)",2.999153,,,,,,
+var_share/time/build_batch,"[50,100)",0.0034,,,,,,
+var_share/time/forward,"[50,100)",0.590502,,,,,,
+var_share/time/generate,"[50,100)",56.312351,,,,,,
+var_share/time/identity_check,"[50,100)",0.0,,,,,,
+var_share/time/loss_compute,"[50,100)",0.002797,,,,,,
+var_share/time/optimizer,"[50,100)",0.0,,,,,,
+var_share/time/render,"[50,100)",1e-06,,,,,,
+var_share/time/reward,"[50,100)",0.0,,,,,,
+var_share/time/sync_weights,"[50,100)",1e-06,,,,,,
+var_share/covariance remainder,"[50,100)",40.091794,,,,,,
+time/tokens_per_sec_generate,"[50,100)",2207.614476,,,,,,
+train/reward_mean,"[50,100)",0.76625,,,,,,
+train/format_rate,"[50,100)",0.9875,,,,,,
+straggler/p99_p50_ratio,steady,1.796553,0.317841,1.13948,2.528395,1.401223,2.192719,
+straggler/completion_len_max,steady,414.46,91.449821,178,512,299,512,
+straggler/completion_len_median,steady,218.84,32.04309,154,295,178,261.5,
+train/truncated_frac,steady,0.012812,0.029221,0,0.171875,0,0.046875,
+train/completion_tokens,steady,14880.08,2223.278888,9610,19720,12202,17384,
+check/timing_residual_frac (max=|.|),steady,0.00032,,,0.000586,,,
+check/logprob_identity [steady],steady,-0.001381,0.001836,-0.007058,0.002159,-0.003864,0.000764,
+check/logprob_identity [last_20],last_20,-0.002855,0.001562,-0.007058,-6e-05,-0.004494,-0.001284,
+check/logprob_identity_min,steady,-0.023892,0.009638,-0.054055,-0.008655,-0.037248,-0.014447,
+check/logprob_identity_max,steady,0.016051,0.004382,0.008065,0.02412,0.010564,0.022589,
+train/reward_mean [steady],steady,0.76625,0.151489,0.390625,1,0.546875,0.9375,
+train/reward_mean [last_20],last_20,0.760938,0.182577,0.40625,1,0.453125,0.953125,
+train/reward_mean Δ(last_20 - steady),last_20-steady,-0.005312,,,,,,
+train/format_rate [steady],steady,0.9875,0.025645,0.859375,1,0.953125,1,
+train/format_rate [last_20],last_20,0.992188,0.017191,0.9375,1,0.953125,1,
+train/format_rate Δ(last_20 - steady),last_20-steady,0.004687,,,,,,
+train/loss [steady],steady,-0.015169,0.014688,-0.052678,0.003807,-0.041432,0,
+GPU Utilization,events-stream,60.333333,30.072482,34,98,36,98,
+GPU Time Accessing Memory,events-stream,30.181818,14.774248,17,59,17,48,
+n_steady_steps,"[50,100)",50,,,,,,
+n_last20_steps,last_20,20,,,,,,
+mean_abs_timing_residual,"[50,100)",0.00032,,,,,,

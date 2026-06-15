@@ -162,6 +162,100 @@ def test_residual_caveat_threshold():
     assert mean_abs_ok < 0.05
 
 
+def _full_rows(n=120):
+    """120 steps with all namespaces; straggler ratio rises, reward and
+    identity step-change after step 100 so last_20 (steps 100..119) differs
+    from the steady window [50,100)."""
+    return [
+        {
+            "_step": i,
+            "_timestamp": 1000.0 + i,
+            "time/wall_clock": 8.0,
+            "straggler/p99_p50_ratio": 1.0 + 0.01 * i,
+            "straggler/completion_len_max": 100.0 + i,
+            "straggler/completion_len_median": 50.0,
+            "train/truncated_frac": 0.1,
+            "train/completion_tokens": 1000.0,
+            "check/timing_residual_frac": 0.0001,
+            "check/logprob_identity": -0.001 if i < 100 else -0.05,
+            "check/logprob_identity_min": -0.01,
+            "check/logprob_identity_max": 0.01,
+            "train/reward_mean": 0.5 if i < 100 else 0.9,
+            "train/format_rate": 0.9,
+            "train/loss": -1.0,
+        }
+        for i in range(n)
+    ]
+
+
+def _entry(sections, label):
+    for _title, entries in sections:
+        for lab, window, stats, bundle in entries:
+            if lab == label:
+                return window, stats, bundle
+    raise KeyError(label)
+
+
+def test_build_report_steady_and_tail_windows():
+    sections, meta = steady_state.build_report(_full_rows(), 50, 100, last_n=20)
+    assert meta["n_steady"] == 50  # steps 50..99
+    assert meta["n_tail"] == 20  # steps 100..119
+
+    # Section 2: rising ratio mean over steps 50..99 = 1.0 + 0.01*mean(50..99).
+    _, stats, bundle = _entry(sections, "straggler/p99_p50_ratio")
+    assert stats == ("mean", "std", "p90", "max")
+    assert bundle["mean"] == pytest.approx(1.0 + 0.01 * statistics.fmean(range(50, 100)))
+    assert bundle["max"] == pytest.approx(1.0 + 0.01 * 99)
+
+    # Section 3: identity steady mean ~ -0.001, last_20 mean ~ -0.05 (drift).
+    assert _entry(sections, "check/logprob_identity [steady]")[2]["mean"] == \
+        pytest.approx(-0.001)
+    assert _entry(sections, "check/logprob_identity [last_20]")[2]["mean"] == \
+        pytest.approx(-0.05)
+
+    # Section 4 start-vs-end delta: reward 0.5 -> 0.9 => +0.4.
+    assert _entry(sections, "train/reward_mean [steady]")[2]["mean"] == pytest.approx(0.5)
+    assert _entry(sections, "train/reward_mean [last_20]")[2]["mean"] == pytest.approx(0.9)
+    assert _entry(sections, "train/reward_mean Δ(last_20 - steady)")[2]["mean"] == \
+        pytest.approx(0.4)
+
+
+def test_build_report_residual_uses_abs_for_max():
+    # A large NEGATIVE residual must trip the max-|.| caveat that a signed
+    # max() would miss (phases exceeding wall = double-count).
+    rows = _full_rows(60)
+    rows[55]["check/timing_residual_frac"] = -0.2
+    _, meta = steady_state.build_report(rows, 50, 60, last_n=20)
+    assert meta["residual_max_abs"] == pytest.approx(0.2)
+
+
+def test_build_report_absent_straggler_keys_are_na():
+    # Older run predating straggler/: those entries are None ('n/a'), no crash.
+    rows = _rows(120)  # has no straggler/ keys
+    sections, meta = steady_state.build_report(rows, 50, 100, last_n=20)
+    assert _entry(sections, "straggler/p99_p50_ratio")[2] is None
+    assert _entry(sections, "straggler/completion_len_max")[2] is None
+    # Keys that DO exist in _rows still resolve.
+    assert _entry(sections, "train/reward_mean [steady]")[2]["mean"] == pytest.approx(0.8)
+
+
+def test_gpu_metric_matches_by_suffix():
+    events = [
+        {"_timestamp": t, "system.gpu.0.gpu": 40.0 + t,
+         "system.gpu.0.memory": 10.0,
+         "system.gpu.0.memoryAllocated": 99.0}  # must NOT match either suffix
+        for t in range(5)
+    ]
+    util, matched = steady_state.gpu_metric(events, (1, 3), "gpu")
+    assert matched == ["system.gpu.0.gpu"]  # not memoryAllocated
+    assert util["mean"] == pytest.approx(statistics.fmean([41.0, 42.0, 43.0]))
+    mem, mmatched = steady_state.gpu_metric(events, None, "memory")
+    assert mmatched == ["system.gpu.0.memory"]  # end-anchored: excludes Allocated
+    assert mem["mean"] == pytest.approx(10.0)
+    # Absent metric -> None, never crash.
+    assert steady_state.gpu_metric(events, None, "powerWatts") == (None, [])
+
+
 def test_empty_window_and_missing_keys():
     _, _, n, span, mean_abs, var_decomp = steady_state.aggregate_window(
         _rows(), 500, 600
