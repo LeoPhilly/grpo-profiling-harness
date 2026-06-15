@@ -6,6 +6,7 @@ verification happens on real runs, per CLAUDE.md)."""
 import inspect
 import math
 
+import pytest
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -154,22 +155,26 @@ def test_two_steps_end_to_end(monkeypatch, tmp_path, capsys):
     assert anomaly_text.startswith("=== run start (test-run) ===\n")
     assert anomaly_text.count("=== run start") == 1
 
-    # Straggler length metrics, from per-sequence completion token counts.
+    # Straggler metrics live in their own namespace now.
     for m in history:
-        assert m["train/completion_len_max"] >= m["train/completion_len_median"]
-        assert m["train/completion_len_median"] >= 1
-        assert m["train/completion_len_mean"] > 0
-        assert m["train/straggler_ratio"] == (
-            m["train/completion_len_max"] / m["train/completion_len_median"]
-        )
+        assert m["straggler/completion_len_max"] >= m["straggler/completion_len_median"]
+        assert m["straggler/completion_len_median"] >= 1
     for logged in recorder.logged:
         for key in (
+            "straggler/p99_p50_ratio",
+            "straggler/completion_len_median",
+            "straggler/completion_len_max",
+        ):
+            assert key in logged
+        # The dropped train/ keys must be gone (superseded), truncated_frac stays.
+        for gone in (
             "train/completion_len_max",
             "train/completion_len_median",
             "train/completion_len_mean",
             "train/straggler_ratio",
         ):
-            assert key in logged
+            assert gone not in logged
+        assert "train/truncated_frac" in logged
 
     # Per-step stdout line, built from the metrics dict.
     out = capsys.readouterr().out
@@ -191,6 +196,28 @@ def test_two_steps_end_to_end(monkeypatch, tmp_path, capsys):
     for batch in generator.received_prompts:
         for ids in batch:
             assert all(isinstance(t, int) for t in ids)
+
+
+def test_straggler_ratio_identity_hand_built():
+    # The exact formula the loop logs, on a hand-built length array with
+    # hand-computed quantiles (non-circular: the expected q50/q99 are worked
+    # out by hand, not read back from torch.quantile).
+    lens = torch.tensor([float(x) for x in range(10, 111, 10)])  # 10..110, n=11
+    q50 = torch.quantile(lens, 0.50).item()
+    q99 = torch.quantile(lens, 0.99).item()
+    # linear interp: q50 at index 0.5*10=5 -> 60; q99 at 0.99*10=9.9 ->
+    # 100 + 0.9*(110-100) = 109.
+    assert q50 == pytest.approx(60.0)
+    assert q99 == pytest.approx(109.0)
+    ratio = q99 / q50 if q50 > 0 else 0.0
+    assert ratio == pytest.approx(109.0 / 60.0)
+    assert q99 >= q50
+
+    # median==0 guard: majority zeros -> q50==0 -> ratio 0.0, not a div error.
+    zeros = torch.tensor([0.0, 0.0, 0.0, 1.0, 2.0])  # q50 at index 2 -> 0
+    q50z = torch.quantile(zeros, 0.50).item()
+    assert q50z == 0.0
+    assert (torch.quantile(zeros, 0.99).item() / q50z if q50z > 0 else 0.0) == 0.0
 
 
 def test_anomaly_tripwire_respects_threshold(monkeypatch, tmp_path):

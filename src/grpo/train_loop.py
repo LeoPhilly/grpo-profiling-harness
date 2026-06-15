@@ -373,12 +373,16 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
         identity_max = seq_logratios.max().item() if seq_logratios.numel() else 0.0
         truncated = [bool(out.get("truncated", False)) for out in outs]
         # Straggler anatomy: at G completions per prompt, one long sequence
-        # holds the whole generate phase hostage; max/median is the
-        # straggler signal. Median is torch's lower-median (no interpolation).
+        # holds the whole generate phase hostage. p99/p50 is the straggler
+        # signal; q50 is reported as the median so the logged ratio is
+        # exactly p99 / straggler/completion_len_median (linear-interp
+        # quantiles). At small batch (G=4 -> 16 seqs) p99 ~ max — expected,
+        # and on-theme: the tail IS the straggler.
         completion_lens = torch.tensor(
             [len(out["token_ids"]) for out in outs], dtype=torch.float32
         )
-        len_median = completion_lens.median().item()
+        len_q50 = torch.quantile(completion_lens, 0.50).item()
+        len_q99 = torch.quantile(completion_lens, 0.99).item()
         metrics = {
             "train/loss": loss.item(),
             "train/reward_mean": rewards.mean().item(),
@@ -389,12 +393,11 @@ def train(cfg: TrainConfig, generator, pairs) -> list:
             # identity excursion; vLLM reports it via finish_reason.
             "train/truncated_frac": sum(truncated) / len(truncated),
             "train/completion_tokens": completion_tokens,
-            "train/completion_len_max": completion_lens.max().item(),
-            "train/completion_len_median": len_median,
-            "train/completion_len_mean": completion_lens.mean().item(),
-            "train/straggler_ratio": (
-                completion_lens.max().item() / len_median if len_median > 0 else 0.0
+            "straggler/p99_p50_ratio": (
+                len_q99 / len_q50 if len_q50 > 0 else 0.0
             ),
+            "straggler/completion_len_median": len_q50,
+            "straggler/completion_len_max": completion_lens.max().item(),
             "check/logprob_identity": identity,
             "check/logprob_identity_min": identity_min,
             "check/logprob_identity_max": identity_max,
