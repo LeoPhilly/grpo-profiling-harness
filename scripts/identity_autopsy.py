@@ -79,6 +79,19 @@ def rescore(model, batch):
     return torch.cat(chunks, dim=0)
 
 
+def autopsy_out_dir(results_root, checkpoint):
+    """CSV output dir (extends the output-versioning rule). Fresh-weights
+    runs write to v2/; a --checkpoint run writes to
+    v2/checkpoint-<basename>/ so it can't overwrite the fresh-weights
+    baseline it's being compared against. Path(...).name (not
+    os.path.basename) so a trailing slash on the checkpoint path still
+    yields the directory name."""
+    out = results_root / "identity_autopsy" / "v2"
+    if checkpoint:
+        out = out / f"checkpoint-{Path(checkpoint).name}"
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
@@ -148,12 +161,13 @@ def main():
         recomputed["fp32"][max_new] = rescore(model, batches[max_new])
 
     # v2 outputs go in their own directory — never into the v1 root, so old
-    # and new evidence can't be confused mid-diagnosis.
-    out_dir = (
-        Path(__file__).resolve().parent.parent / "results" / "identity_autopsy" / "v2"
+    # and new evidence can't be confused mid-diagnosis. A --checkpoint run
+    # is further isolated so it can't clobber the fresh-weights baseline.
+    out_dir = autopsy_out_dir(
+        Path(__file__).resolve().parent.parent / "results", args.checkpoint
     )
     out_dir.mkdir(parents=True, exist_ok=True)
-    print("autopsy v2 (signed, absolute-position bins)")
+    print(f"autopsy v2 (signed, absolute-position bins) -> {out_dir}")
 
     for max_new in MAX_NEW_TOKEN_CONFIGS:
         batch, outs = batches[max_new], gens[max_new]

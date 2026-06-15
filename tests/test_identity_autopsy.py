@@ -10,6 +10,23 @@ identity_autopsy = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(identity_autopsy)
 
 position_bucket = identity_autopsy.position_bucket
+autopsy_out_dir = identity_autopsy.autopsy_out_dir
+
+
+def test_out_dir_fresh_vs_checkpoint():
+    root = Path("/results")
+    # Fresh-weights run: unchanged v2 baseline dir.
+    assert autopsy_out_dir(root, None) == root / "identity_autopsy" / "v2"
+    assert autopsy_out_dir(root, "") == root / "identity_autopsy" / "v2"
+    # --checkpoint run: isolated subdir from the checkpoint's basename, so it
+    # can't overwrite the fresh-weights baseline.
+    ckpt = "results/checkpoints/r2-g8-cache-on-1.5b-profile"
+    assert autopsy_out_dir(root, ckpt) == (
+        root / "identity_autopsy" / "v2" / "checkpoint-r2-g8-cache-on-1.5b-profile"
+    )
+    # Trailing slash must still yield the dir name (os.path.basename would
+    # return "" here; Path(...).name does not).
+    assert autopsy_out_dir(root, "a/b/r2-g8/").name == "checkpoint-r2-g8"
 
 
 def test_absolute_bins_with_boundary_rows():
