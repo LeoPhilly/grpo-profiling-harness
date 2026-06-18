@@ -25,6 +25,7 @@ We run a co-located 1xA100 GRPO RL infrastructure using Qwen2.5-1.5B-Instruct an
   - [Stability: Why were only steps 50-100 considered?](#stability-why-were-only-steps-50-100-considered)
   - [Coverage: How were the phases divided up?](#coverage-how-were-the-phases-divided-up)
   - [Correctness: How do you know the wall clock phases accounted only for those phases?](#correctness-how-do-you-know-the-wall-clock-phases-accounted-only-for-those-phases)
+  	- [Injection Tests](#Injection-tests)
     - [How did you know how long a cycle would take on your GPU?](#how-did-you-know-how-long-a-cycle-would-take-on-your-gpu)
     - [Why didn't you run the injection tests on a real run with a real pipeline?](#why-didnt-you-run-the-injection-tests-on-a-real-run-with-a-real-pipeline)
     - [Two Independent Checks:](#two-independent-checks)
@@ -56,7 +57,7 @@ We run a co-located 1xA100 GRPO RL infrastructure using Qwen2.5-1.5B-Instruct an
 	  - [How does the overall wall clock increase? Is it in proportion to G?](#how-does-the-overall-wall-clock-increase-is-it-in-proportion-to-g)
 	  - [Why does the log ratio drift occur more drastically in G=32 but not at all in G=16?](#why-does-the-log-ratio-drift-occur-more-drastically-in-g32-but-not-at-all-in-g16)
   - [How noisy are these numbers? Are the multiples trustworthy?](#how-noisy-are-these-numbers-are-the-multiples-trustworthy)
-  - [Was Amdahl's law noticable?](#was-amdahls-law-noticable)
+  - [Was Amdahl's law noticeable?](#was-amdahls-law-noticeable)
 - [Future work & Limitations](#future-work--limitations)
   - [Which other forms of optimization would you profile next?](#which-other-forms-of-optimization-would-you-profile-next)
   - [Further work into the straggler problems](#further-work-into-the-straggler-problems)
@@ -67,7 +68,7 @@ We run a co-located 1xA100 GRPO RL infrastructure using Qwen2.5-1.5B-Instruct an
 
 ## What is your goal/motivation here?
 
-My goal is to build a profiling tool, with a validation framework demonstrating proof of correctness, for the wall-clock of each phases of the GRPO RL process. This can be extended to variants like Dr.GRPO/DAPO etc; essentially any RL algo that lacks a policy critic and has multiple generations per prompt. From there, I was curious to see what aspects of profiling change with varying G (number of generations per prompt), and how this causes the bottleneck to move.
+My goal is to build a profiling tool, with a validation framework demonstrating proof of correctness, for the wall-clock of each phase of the GRPO RL process. This can be extended to variants like Dr.GRPO/DAPO etc; essentially any RL algo that lacks a value critic and has multiple generations per prompt. From there, I was curious to see what aspects of profiling change with varying G (number of generations per prompt), and how this causes the bottleneck to move.
 
 For context, I was aware that generation takes the majority of time in this particular type of RL process, but was curious to see how prominent this would be at a small scale setting, and how much time each of the other phases would take.
 
@@ -79,7 +80,7 @@ Since I was using the GSM8K dataset, I wanted there to be room for the model to 
 
 ### Why choose A100 40GB instead of H100 80GB?
 
-I initially planned to use A100 80GB, but unfortunately lambda labs only had the A100 40GB available, and the A100 was about ⅓ of the cost of the H100.
+I initially planned to use A100 80GB, but unfortunately Lambda Labs only had the A100 40GB available, and the A100 was about ⅓ of the cost of the H100.
 
 ## Loss Formula Calculation
 
@@ -89,11 +90,11 @@ The goal for inner epoch == 1 was to catch policy drift (since in this case the 
 
 ### Why is there no clipping mechanism?
 
-Note again that since we are using inner epoch ==1, there is no need for the importance sampling clipping mechanism since that is used when inner epochs > 1 (and off-policy) to keep the updates under a certain range.
+Note again that since we are using inner epoch ==1, there is no need for the importance sampling clipping mechanism , which is used when inner epochs > 1 (and off-policy) to keep the updates under a certain range.
 
 ### Why is there no KL penalty in your GRPO loss formula?
 
-Note that many of the current variations of GRPO (including Dr.GRPO and DAPO) both remove the reference model KL penalty and see better returns. Moreover, from a principle standpoint, as I was running it on GSM8K and only for a limited number of steps with profiling being the goal, the current policy drifting too far was not a concern. Also, from a practical standpoint, I was running my A100 at > 80% memory, and storing the reference model would be limiting (especially since I was going to increase G and was already hitting OOM errors).
+Note that many of the current variations of GRPO (including Dr.GRPO and DAPO) both remove the reference model KL penalty and see better returns. Moreover, from a principled standpoint, as I was running it on GSM8K and only for a limited number of steps with profiling being the goal, the current policy drifting too far was not a concern. Also, from a practical standpoint, I was running my A100 at > 80% memory, and storing the reference model would be limiting (especially since I was going to increase G and was already hitting OOM errors).
 
 ### How did you choose the reward formula?
 
@@ -103,7 +104,7 @@ The reward/answers format is one of the challenges of using GSM8K, and the metri
 
 ### What OOM errors did you run into?
 
-Note that since I was running this on a single A100 40GB, this was a colocated GPU set up (using the same GPU is used for both generation/training) with training done via HF and generation done via vLLM. I ran into quite a few OOM errors and I have listed some of the major ones (in order of occurrence), along with their solutions/diagnostics below:
+Note that since I was running this on a single A100 40GB, this was a colocated GPU set up (the same GPU is used for both generation/training) with training done via HF and generation done via vLLM. I ran into quite a few OOM errors and I have listed some of the major ones (in order of occurrence), along with their solutions/diagnostics below:
 
 #### vLLM gpu_memory_utilization
 
@@ -111,13 +112,13 @@ Firstly, the vLLM gpu_memory_utilization was at 0.9 by default which is already 
 
 #### FP32 to BF16
 
-Next, I reduced the model load type from FP32 to BF16. By default, HF stores the AdamW params (weights, grads and the 2 moments) at FP32 (same as model load type). By rough calculation, at 4 bytes for each of the 1.5B params, this takes up 6GB (weights) + 6GB(grads) + 12GB (both moments) = 24GB. While less than 28GB, this is before any of the forward/backward activations and hence also ran into OOM errors. By changing all of the above to BF16, this would take about 2 bytes instead of 4, for a total of 12GB.
+Next, I reduced the model load type from FP32 to BF16. By default, HF stores the AdamW params (weights and the 2 moments) along with grads at FP32 (same as model load type). By rough calculation, at 4 bytes for each of the 1.5B params, this takes up 6GB (weights) + 6GB(grads) + 12GB (both moments) = 24GB. While less than 28GB, this is before any of the forward/backward activations and hence also ran into OOM errors. By changing all of the above to BF16, this would take about 2 bytes instead of 4, for a total of 12GB.
 
-Note that this brings some precision and training stability tradeoff (since even in mixed-precision training master weights are always fp32), and is one of the many limitations of this experiment.
+Note that this introduces some precision and training stability tradeoff (since even in mixed-precision training master weights are always fp32), and is one of the many limitations of this experiment.
 
 #### Logsumexp trick
 
-After running into OOM errors still, I used the logsumexp trick from this article: https://omkaark.com/posts/cce.html (which got it from this paper originally: https://arxiv.org/html/2411.09009v1). GRPO requires per token_log_prob at a token level, and I was initially building the whole log_softmax tensor (for logits - log(sum(exp(logits))), and then grabbing the value for the chosen log index. Using this trick, I changed it to log (chosen) - logsumexp(logits), which worked. Also note that this was needed because I was running 4 micro batches at a time, with initial G=8, for a total of 32 sequences per step.
+After continuing to run into OOM errors, I used the logsumexp trick from this article: https://omkaark.com/posts/cce.html (which got it from this paper originally: https://arxiv.org/html/2411.09009v1). GRPO requires per token_log_prob at a token level, and I was initially building the whole log_softmax tensor (for logits - log(sum(exp(logits))), and then grabbing the value for the chosen log index. Using this trick, I changed it to log (chosen) - logsumexp(logits), which worked. Also note that this was needed because I was running 4 micro batches at a time, with initial G=8, for a total of 32 sequences per step.
 
 ## Timing Design
 
@@ -147,8 +148,10 @@ In addition, I also logged time/wall_clock which measures the entire process (us
 ### Correctness: How do you know the wall clock phases accounted only for those phases?
 
 GPU phases are timed via pairs of cuda event timers (using a context manager), and CPU is timed via time.perf_counter().
-	Injection Tests:
-	To ensure that the cuda events were correctly in my Phase Timer design, I created 4 dummy phases (in order, each of ~10ms) and added cuda sleep cycles to each and measured the wall clock changes for each phase to account for any spillovers. Essentially, the injection should show up only on the particular phase it was added to and the surrounding phases should remain the same as measured by an initial baseline. As a side note, I initially considered adding an async operation (like a large matmul) since this would actually add a known operation to the GPU instead of sleep, but chose against it because this might have effects on memory too.
+	
+#### Injection Tests:
+
+To ensure that the cuda events were correctly placed in my Phase Timer design, I created 4 dummy phases (in order, each of ~10ms) and added cuda sleep cycles to each and measured the wall clock changes for each phase to account for any spillovers. Essentially, the injection should show up only on the particular phase it was added to and the surrounding phases should remain the same as measured by an initial baseline. As a side note, I initially considered adding an async operation (like a large matmul) since this would actually add a known operation to the GPU instead of sleep, but chose against it because this might have effects on memory too.
 
 #### How did you know how long a cycle would take on your GPU?
 
@@ -163,7 +166,7 @@ I ran two independent checks – one in the CPU that used python's time.perf_cou
 
 #### When did you sync GPU/CPU? Why not sync it after every phase?
 
-Firstly, we can't sync after every phase because although that gives an accurate reading of the particular phase, it would not reflect the actual pipeline/wall-clock since it would cause artificial slow down at each sync step and would not let async work be reflected. Therefore, I sync GPU/CPU twice, one at the very end to get all the values from the GPU, and once at the very beginning to make sure that the next step has a clean boundary that only accounts for its time and doesn't have any spillover from the previous step.
+Firstly, we can't sync after every phase because although that gives an accurate reading of the particular phase, it would not reflect the actual pipeline/wall-clock since it would cause artificial slow down at each sync step and would prevent async work from being reflected. Therefore, I sync GPU/CPU twice, one at the very end to get all the values from the GPU, and once at the very beginning to make sure that the next step has a clean boundary that only accounts for its time and doesn't have any spillover from the previous step.
 
 #### How did you deal with vLLM running its own engine?
 
@@ -171,7 +174,7 @@ The time/generate surrounds vLLM, and because it runs its own engine, I wasn't s
 
 ### What surprised you?
 
-For the injection tests, I tried installing a GPU injection tests during a CPU phase (like reward), and because we used perf.timer for python, I knew it wouldn't show up here, so I assumed it would spill over to the next GPU clocked phase (where we used cuda events). However, from running this it seems that the next phase cuda events actually don't clock this extra GPU sleep either, it goes unattributed to any phase. It only shows up in the residual = wall clock - sum of all phases clocked section. This was interesting because I assumed that GPU work launched under a CPU phase would show up in the next GPU's wall clock and essentially inflate that by spilling over. Note that the reason for this is that next phase's cuda start event is behind the cuda sleep in the GPU queue, so the cuda start event clock starts only after the cuda sleep is finished. This is also proof that if residual is within the expected margins, it means that there is no major unattributed or unexpected hidden GPU work being done.
+For the injection tests, I tried inserting a GPU injection test during a CPU phase (like reward), and because we used perf.timer for python, I knew it wouldn't show up here, so I assumed it would spill over to the next GPU clocked phase (where we used cuda events). However, from running this it seems that the next phase cuda events actually don't clock this extra GPU sleep either, it goes unattributed to any phase. It only shows up in the residual = wall clock - sum of all phases clocked section. This was interesting because I assumed that GPU work launched under a CPU phase would show up in the next GPU's wall clock and essentially inflate that by spilling over. Note that the reason for this is that next phase's cuda start event is behind the cuda sleep in the GPU queue, so the cuda start event clock starts only after the cuda sleep is finished. This is also proof that if residual is within the expected margins, it means that there is no major unattributed or unexpected hidden GPU work being done.
 
 ### Audit: Is everything accounted for? What are the checks?
 
@@ -240,14 +243,14 @@ This run is logged as 'r0-base-1.5b-g8-profile' in the wandb link. G == 8.
 ### Analysis:
 
 #### Generation is the bottleneck:
-As expected, generation accounts for the biggest piece of the wall clock coming in at 82%. From there, the other major numbers are backward at ~11.5% and  forward ~5% (backward is ~2.3x forward, more than the expected ~2×). All other phases are negligible in the calculation and make up < 2% altogether.
+As expected, generation accounts for the biggest piece of the wall clock coming in at 82%. From there, the other major numbers are backward at ~11.5% and  forward ~5% (backward is ~2.3x forward, more than the expected textbook ~2×). All other phases are negligible in the calculation and make up < 2% altogether.
 
 #### Variance of the wall clock:
-Generator's standard deviation is also quite high compared to the rest, which hints at the straggler problem. The more interesting aspect is that the variance in total wall clock is only 71% explained by the variance of the generated phase, with the next factor being the covariance remainder at 27% instead of an individual phase. This is likely explained by the fact that most of the phases move together, i.e that a longer generation takes longer forward/backward pass instead of all them being independent.
+Generation's standard deviation is also quite high compared to the rest, which hints at the straggler problem. The more interesting aspect is that the variance in total wall clock is only 71% explained by the variance of the generation phase, with the next factor being the covariance remainder at 27% instead of an individual phase. This is likely explained by the fact that most of the phases move together, i.e that a longer generation leads to a longer forward/backward pass instead of all them being independent.
 
 #### Checks: 
 Furthermore, our checks for check/timing_residual_frac and check/logprob_identity
-are also functioning, with logprob_identity showing a concerning drop at the end (addressed below). Residual timing during the steady state (steps 50-100) is <.05%.
+are also functioning, with logprob_identity showing a concerning drop at the end (addressed below). Residual timing during the steady state (steps 50-100) is <0.05%.
 
 ### Why is the log ratio falling off after step 80? How did you debug or fix this?
 
@@ -295,13 +298,13 @@ Note that as long as the weight-sync works, it is technically still on-policy, a
 
 Note full charts are in the appendix. 
 
-As the chart shows, there seems to be no spike in the log ratio numbers in any particular aspects, rather there happens to be small disagreements everywhere. Truncation or position of the token doesn't have any standout impact on the log ratio either, hence ruling out the KV cache or masking/truncation bug hypothesis. Furthermore, the difference is roughly halved when calculations are done in FP32 as opposed to BF16, yet the notable aspect is that the difference remains. This therefore points to kernel/engine level differences between HF and vLLM, which are compounded because my model runs in BF16.
+As the chart shows, there seems to be no spike in the log ratio numbers in any particular aspects, rather there happen to be small disagreements everywhere. Truncation or position of the token don't have any standout impact on the log ratio either, hence ruling out the KV cache or masking/truncation bug hypothesis. Furthermore, the difference is roughly halved when calculations are done in FP32 as opposed to BF16, yet the notable aspect is that the difference remains. This therefore points to kernel/engine level differences between HF and vLLM, which are compounded because my model runs in BF16.
 
 This discrepancy between HF and vLLM also matches the documented vLLM train-inference mismatch, which can be traced down to logprob-processing and lm_head precision as per https://huggingface.co/blog/ServiceNow-AI/correctness-before-corrections
 
 ### How did you check whether the drift was a function of the RL-updated weights?
 
-The only aspect I wanted to confirm further was this was not a downstream effect of updated weights from RL learning. In order to test this, I checkpointed the weights at step 100 and reran the autopsy. The numbers came back nearly the same as above (fp32 halving the log ratio, subtle difference everywhere, no relation to truncation or position), which rules out that the drift is derived from updated weights and once again points to being a property of the live generation via vLLM and recompute via HF dynamics.
+The only aspect that I wanted to confirm further was this was not a downstream effect of updated weights from RL learning. In order to test this, I checkpointed the weights at step 100 and reran the autopsy. The numbers came back nearly the same as above (fp32 halving the log ratio, subtle difference everywhere, no relation to truncation or position), which rules out that the drift is derived from updated weights and once again points to being a property of the live generation via vLLM and recompute via HF dynamics.
 
 ## Part 2 runs: Straggler & G variants
 
@@ -339,7 +342,7 @@ The share of generation falls from 88.7% (G=4) -> 81% -> 69% down to 56% (G=32),
 
 ### How do stragglers worsen with increased G?
 
-The p99_p50_ratio does increase, but not in a concrete way. The change goes from 1.72 -> 1.8 -> 1.8 -> 1.92, with G=32 having the most increase for stragglers. However, the max metric tells a much clearer picture, as it increases from 2.35 -> 2.24 -> 2.53 -> 4.23, again with G=32 having a dramatically higher max. My earlier reasoning about capturing the long tail to demonstrate the straggler problem wasn't quite right, and that the real signal is actually with the worst case stragglers! 
+The p99_p50_ratio does increase, but not in a concrete way. The change goes from 1.72 -> 1.8 -> 1.8 -> 1.92, with G=32 having the most increase for stragglers. However, the max metric shows a much clearer picture, as it increases from 2.35 -> 2.24 -> 2.53 -> 4.23, again with G=32 having a dramatically higher max. My earlier reasoning about capturing the long tail to demonstrate the straggler problem wasn't quite right, and in fact the real signal is actually with the worst case stragglers! 
 
 ### How does the overall wall clock increase? Is it in proportion to G?
 
@@ -348,13 +351,13 @@ Wall clock increases by multiples of 1.31x -> 1.05x -> 1.43x. Two things of note
 
 ### Why does the log ratio drift occur more drastically in G=32 but not at all in G=16?
 
-This was a very surprising result as I expected the drift to be more substantially for G= 16 and even more so for G=32. While it was significant for G=32, and moderate for G=8 (from earlier) there was no noticeable drift for G=16 or G= 4. I'm not sure why this is the case, it could be due to my single seed run or it's possible there are certain batch sizes that take a different kernel path (for example, using powers of 2 is a known GPU optimization, perhaps in this case using power of 4 is the differentiator?)
+This was a very surprising result as I expected the drift to be more substantial for G= 16 and even more so for G=32. While it was significant for G=32, and moderate for G=8 (from earlier) there was no noticeable drift for G=16 or G= 4. I'm not sure why this is the case, it could be due to my single seed run or it's possible there are certain batch sizes that take a different kernel path (for example, using powers of 2 is a known GPU optimization, perhaps in this case using power of 4 is the differentiator?)
 
 ### How noisy are these numbers? Are the multiples trustworthy?
 
-The most significant limitation is that these numbers are done on a relatively small scale and hence they are bound to be quite noisy; and while the multiple themselves are specific to this config of this experiment, the more important takeaways are the reasoning and direction of each of the metrics.
+The most significant limitation is that these numbers are done on a relatively small scale and hence they are bound to be quite noisy; and while the multiples themselves are specific to this config of this experiment, the more important takeaways are the reasoning and direction of each of the metrics.
 
-### Was Amdahl's law noticable?
+### Was Amdahl's law noticeable?
 
 As a general pattern, all the throughput type gains (tokens/sec, wall clock, per completion cost) were sublinear in that each doubling of G got less than <2x change. This is Amdahl's law in spirit -- the generations get optimized, but the un-amortized backward pass's share increases and hence overall gain starts to flatten. 
 
@@ -367,14 +370,14 @@ I would like to create a flowchart/ladder of RL specific optimizations and see h
 
 ### Further work into the straggler problems
 
-It has been shown in research that truncating the number of generations by first to 6 (out of 8, for example) has a bias for shorter length answers. An interesting next step would be to actually let these 2 unaccounted for generations run in the background, and then do an analysis of what their rewards actually were compared to the rewards of the first 6, and how much exactly do they change the mean and sd, and whether the wall clock gain is worth the tradeoff. Note that this bias is different from the GRPO length bias that is laid out in the Dr.GRPO paper, which is due to per token dilution bias; the above described one comes solely from considering generations with faster timings, and hence shorter lengths (assuming generations all have the same speed). Another interesting aspect of GRPO is that we can have dynamic G based on the prompt's inherent variance, in which case everyone starts with G == 4, but only if the reward variation is below a threshold do we increase G.
+It has been shown in research that truncating the number of generations by first to 6 (out of 8, for example) has a bias for shorter length answers. An interesting next step would be to actually let these 2 unaccounted for generations run in the background, and then do an analysis of what their rewards actually were compared to the rewards of the first 6, and how much exactly do they change the mean and sd, and whether the wall clock gain is worth the tradeoff. Note that this bias is different from the GRPO length bias that is laid out in the Dr.GRPO paper, which is due to per token dilution bias; the above described one comes solely from considering generations with faster timings, and hence shorter lengths (assuming generations all have the same speed). Another interesting aspect of GRPO is that we can have dynamic G based on the prompt's inherent variance, in which case every prompt starts with G = 4, but only if the reward variation is below a threshold do we increase G.
 
 ### Limitations
 
-All weights are used in bf16 form, instead of the ideal fp32 (for master weights) which are used in real training.
+All weights are used in bf16 form, instead of the ideal fp32 (for master weights) which is used in real training.
 Most of the other limitations come from the small scale of the experiment, that is the low model parameter, single GPU and relatively straightforward dataset.
-For example, in real infrastructure for RL, especially for agents and domain specific fields, the rewards are unlikely to be a straightforward calculation. Moreover, with tool use capacity, the generations themselves might not be outputted at the same speed, and the tail end is likely to be significantly higher.
-Furthermore, practical scale RL infra also introduces clusters of GPUs to hold GPUs for both training and generation, and therefore we have to take into account the design of those too. For example, using DDP methods such as FSDP or various forms of ZeRO introduces communication costs (ring all reduce, all to all) etc.
+For example, in real infrastructure for RL, especially for agents and domain specific fields, the rewards are unlikely to be a straightforward calculation. Moreover, with tool use capacity, the generations themselves might not be output at the same speed, and the tail end is likely to be significantly higher.
+Furthermore, practical scale RL infra also introduces separate GPU clusters for both training and generation, and therefore we have to take into account the design of those too. For example, using DDP methods such as FSDP or various forms of ZeRO introduces communication costs (ring all reduce, all to all) etc.
 
 ## How was AI used?
 
