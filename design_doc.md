@@ -94,11 +94,11 @@ Note again that since we are using inner epoch ==1, there is no need for the imp
 
 ### Why is there no KL penalty in your GRPO loss formula?
 
-Note that many of the current variations of GRPO (including Dr.GRPO and DAPO) both remove the reference model KL penalty and see better returns. Moreover, from a principled standpoint, as I was running it on GSM8K and only for a limited number of steps with profiling being the goal, the current policy drifting too far was not a concern. Also, from a practical standpoint, I was running my A100 at > 80% memory, and storing the reference model would be limiting (especially since I was going to increase G and was already hitting OOM errors).
+Note that many of the current variations of GRPO (including Dr.GRPO and DAPO) remove the reference model KL penalty and see better returns. Moreover, from a principled standpoint, as I was running it on GSM8K and only for a limited number of steps with profiling being the goal, the current policy drifting too far was not a concern. Also, from a practical standpoint, I was running my A100 at > 80% memory, and storing the reference model would be limiting (especially since I was going to increase G and was already hitting OOM errors).
 
 ### How did you choose the reward formula?
 
-The reward/answers format is one of the challenges of using GSM8K, and the metrics that clearly can show with examples that RL is working. I used the standard rewards formula for GSM8K that is used in the popular verl library (https://github.com/verl-project/verl). However, in order to prevent reward hacking, I used only the strict version of the format.
+The reward/answers format is one of the challenges of using GSM8K, and the metric that can clearly show with examples that RL is working. I used the standard rewards formula for GSM8K that is used in the popular verl library (https://github.com/verl-project/verl). However, in order to prevent reward hacking, I used only the strict version of the format.
 
 ## Experiment Set-up/Debugging Details
 
@@ -246,7 +246,7 @@ This run is logged as 'r0-base-1.5b-g8-profile' in the wandb link. G == 8.
 As expected, generation accounts for the biggest piece of the wall clock coming in at 82%. From there, the other major numbers are backward at ~11.5% and  forward ~5% (backward is ~2.3x forward, more than the expected textbook ~2×). All other phases are negligible in the calculation and make up < 2% altogether.
 
 #### Variance of the wall clock:
-Generation's standard deviation is also quite high compared to the rest, which hints at the straggler problem. The more interesting aspect is that the variance in total wall clock is only 71% explained by the variance of the generation phase, with the next factor being the covariance remainder at 27% instead of an individual phase. This is likely explained by the fact that most of the phases move together, i.e that a longer generation leads to a longer forward/backward pass instead of all them being independent.
+Generation's standard deviation is also quite high compared to the rest, which hints at the straggler problem. The more interesting aspect is that the variance in total wall clock is only 71% explained by the variance of the generation phase, with the next factor being the covariance remainder at 27% instead of an individual phase. This is likely explained by the fact that most of the phases move together, i.e that a longer generation leads to a longer forward/backward pass instead of all of them being independent.
 
 #### Checks: 
 Furthermore, our checks for check/timing_residual_frac and check/logprob_identity
@@ -304,7 +304,7 @@ This discrepancy between HF and vLLM also matches the documented vLLM train-infe
 
 ### How did you check whether the drift was a function of the RL-updated weights?
 
-The only aspect that I wanted to confirm further was this was not a downstream effect of updated weights from RL learning. In order to test this, I checkpointed the weights at step 100 and reran the autopsy. The numbers came back nearly the same as above (fp32 halving the log ratio, subtle difference everywhere, no relation to truncation or position), which rules out that the drift is derived from updated weights and once again points to being a property of the live generation via vLLM and recompute via HF dynamics.
+The only aspect that I wanted to confirm further was that this was not a downstream effect of updated weights from RL learning. In order to test this, I checkpointed the weights at step 100 and reran the autopsy. The numbers came back nearly the same as above (fp32 halving the log ratio, subtle difference everywhere, no relation to truncation or position), which rules out that the drift is derived from updated weights and once again points to being a property of the live generation via vLLM and recompute via HF dynamics.
 
 ## Part 2 runs: Straggler & G variants
 
